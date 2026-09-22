@@ -1,0 +1,42 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: conciliacao-pix
+
+  mongodb:
+    uri: mongodb://localhost:27017/conciliacao-pix?replicaSet=rs0
+
+  data:
+    mongodb:
+      auto-index-creation: true
+
+  kafka:
+    bootstrap-servers: localhost:19092
+    consumer:
+      group-id: pix-reconciliation-group
+      auto-offset-reset: earliest
+
+app:
+  kafka:
+    topics:
+      pix-transactions: pix.transactions
+      pix-transactions-dlt: pix.transactions.DLT
+      pix-reconciliation-result: pix.reconciliation.result
+  timeknobs:
+    outbox:
+      send-timeout-ms: 30000
+      poll-interval-ms: 5000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+logging:
+  level:
+    root: "INFO"
+    br.com.desafio.conciliacaopix: DEBUG
+
