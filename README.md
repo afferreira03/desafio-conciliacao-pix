@@ -375,18 +375,59 @@ Produção das mensagens: ~20.000 msg/s (o gerador não é o gargalo).
 - **Corretude sob carga**: esperado = obtido em todas as rodadas, inclusive reentregas e segundos pagamentos
   concorrentes.
 
+### Onde está o custo no MongoDB (medido)
+
+Tempo por comando no driver do MongoDB durante a fase de conciliação de um burst de 5.000 mensagens (6 × 6, banco
+limpo, 299 conciliações/s), a partir do timer `mongodb.driver.commands` que o Spring Boot registra automaticamente
+(`mongodb_driver_commands_seconds_*` em `/actuator/prometheus`, diferença antes × depois da rodada):
+
+| Comando | Por conciliação | Média | Parcela do tempo no Mongo |
+|---|---|---|---|
+| `commitTransaction` | 1,00 | **6,0 ms** | **32 %** |
+| `update outbox_events` (insert do outbox via `save()` + `SENT` do relay, um por evento) | 1,55 | 3,1 ms | 26 % |
+| `find reconciliations` (verificação de idempotência) | 1,05 | 1,9 ms | 11 % |
+| `update reconciliations` (insert via `save()` = upsert) | 1,00 | 2,0 ms | 11 % |
+| `find invoices` (por `txId`) | 1,00 | 1,9 ms | 10 % |
+| `update invoices` (compare-and-set) | 0,74 | 2,0 ms | 8 % |
+
+- **~6,4 comandos e ~18 ms de MongoDB por conciliação, todos sequenciais.** Com 6 threads, há em média ~5,5 comandos
+  em voo o tempo todo: os consumers passam quase todo o tempo esperando o banco — por isso 12 × 12 não escala.
+- **Dois custos somados**: o `commitTransaction` (espera o journal ir para disco, ~6 ms) é o maior item isolado; e
+  cada operação simples indexada custa ~2 ms, quando deveria ficar bem abaixo de 1 ms — round-trip pela rede do
+  Docker Desktop + contenção. O MongoDB ficou em ~1 núcleo de CPU em média (picos de 160–250 %); o Redpanda, em ~5 %.
+- **Variância do ambiente**: rodadas idênticas no mesmo notebook variaram de 215 a 287 conciliações/s. Ganhos de
+  10–20 % não são mensuráveis de forma confiável aqui — a validação de cada otimização abaixo pede um ambiente estável
+  (máquina dedicada, várias rodadas, mediana).
+
+### Caminhos para melhorar o MongoDB (priorizados)
+
+Em ordem de relação ganho × risco. Nenhum foi aplicado nesta versão; todos preservam as garantias atuais
+(idempotência, atomicidade registro + fatura + outbox, compare-and-set).
+
+| # | Caminho | Ataca | Ganho esperado | Custo / risco |
+|---|---|---|---|---|
+| 1 | **Relay do outbox com atualização em lote**: um `updateMany` por lote (`_id IN (...)` → `SENT`) em vez de `saveAll` (uma escrita por evento) | ~0,5 comando por conciliação e o atraso do relay sob carga | ~5–10 % menos tempo no Mongo; relay acompanha o burst | Baixo — mudança local no `OutboxEventPoller` + um método `@Update` no repositório |
+| 2 | **`insert` em vez de `save()`** para registro e outbox (hoje `save()` com id preenchido vira upsert) | Custo de cada escrita; semântica mais correta (insert falha em id duplicado) | Pequeno por escrita, 2 escritas por conciliação | Baixo |
+| 3 | **Idempotência sem leitura prévia**: inserir direto e tratar `DuplicateKeyException` no serviço, **fora** da transação (que já terá sido desfeita), devolvendo o registro existente | 1 dos ~6 round-trips no caminho feliz (duplicatas são raras) | ~15 % menos comandos | Médio — altera a lógica de idempotência; exige teste de integração do caminho de duplicata concorrente |
+| 4 | **Listener em lote + `bulkWrite`**: N mensagens por poll, escritas agrupadas por coleção, uma transação por lote | Round-trips **e** commits: ~6 comandos por mensagem → poucos por lote; um flush de journal para N mensagens | O maior ganho disponível (ordem de grandeza) | Alto — falha de compare-and-set afeta o lote (reprocessar item a item), tratamento de falha parcial (`BatchListenerFailedException`), latência passa a depender do tamanho do lote |
+| 5 | **Aplicação na mesma rede do banco / Linux / disco dedicado** | ~2 ms por round-trip e o custo do journal em disco virtualizado | Grande neste ambiente (Docker Desktop no Windows é o pior caso) | Operacional, sem mudança de código |
+| 6 | **Modelo sem transação multi-documento**: outbox embutido no documento da conciliação (escrita de um documento é atômica sem transação) + compare-and-set da fatura antes | Overhead de transação e o `commitTransaction` | Alto | Alto — falha entre as duas escritas exige rotina de recuperação |
+| 7 | **Cluster sharded** (chave hash em `txId`/`endToEndId`), relay por **CDC** (change streams / Debezium) | Limite de um nó; polling do outbox | Escala horizontal até o NFR | Infraestrutura de produção |
+
+**O que não fazer**: relaxar a durabilidade (`w:1` / `j:false` no commit) aceleraria os números, mas perder uma
+conciliação já confirmada não é aceitável para pagamentos — no máximo como experimento para confirmar o custo do
+journal, nunca em produção.
+
+Recomendação: 1 e 2 imediatamente (baixo risco); 3 com teste de integração dedicado; 4 como a evolução estrutural
+para o NFR de vazão, validada em ambiente dimensionado; 5–7 fazem parte do desenho de produção.
+
 ### Argumento de escala até 2.000–7.000 TPS
 
 - **Paralelismo = partições.** Escala horizontal adicionando instâncias ao mesmo consumer group até o nº de partições;
   dimensionar partições para o pico (ex.: 7.000 TPS ÷ vazão medida por partição, com folga). Partições e threads já
   são configuráveis (`PIX_PARTITIONS`, `PIX_CONCURRENCY`).
-- **Mas o teste mostra que o próximo gargalo é o banco**, então escalar consumers sozinho não basta:
-  - MongoDB em **cluster sharded** (chave hash em `txId`/`endToEndId`), em hardware dedicado — o nó único em Docker
-    Desktop é o pior caso;
-  - **listener em lote + bulk writes** (um round-trip para N mensagens em vez de ~6 por mensagem);
-  - relay do outbox com **update em lote** (`updateMulti` por `_id IN (...)`) e, em volume maior, **CDC**
-    (change streams / Debezium) no lugar de polling;
-  - revisar write concern/journal conforme o requisito de durabilidade.
+- **Mas o teste mostra que o próximo gargalo é o banco**, então escalar consumers sozinho não basta — ver
+  "Caminhos para melhorar o MongoDB" acima (listener em lote + bulk writes, relay em lote, sharding, CDC).
 - **Chave por `txId`** preserva a ordem por fatura mesmo com muitas partições; risco de hot key é desprezível (uma
   fatura ≈ um pagamento).
 
@@ -474,8 +515,9 @@ integração (`*IT`, via failsafe; requer Docker).
 - Mensagens no DLT não têm reprocessamento automatizado → ferramenta de replay com correção.
 - Registros `SENT` do outbox não são expurgados → índice TTL em `sentAt`.
 - Contrato de evento acoplado ao modelo de domínio → DTO de integração versionado / schema registry.
-- **Vazão de um nó (~300/s no ambiente de teste) limitada pelo MongoDB**, não pelo consumer → listener em lote + bulk
-  writes, update em lote no relay do outbox, sharding (ver seção 8).
+- **Vazão de um nó (~300/s no ambiente de teste) limitada pelo MongoDB**, não pelo consumer: ~6,4 comandos
+  sequenciais e ~18 ms de banco por conciliação → caminhos priorizados na seção 8 ("Caminhos para melhorar o
+  MongoDB").
 - As fábricas Kafka customizadas (consumer, DLT, outbox) são montadas a partir de `KafkaProperties` e **não usam os
   `ConnectionDetails` do Spring Boot** — nos testes de integração o broker é injetado por
   `spring.kafka.bootstrap-servers`; evolução: construir as fábricas a partir de `KafkaConnectionDetails`.
