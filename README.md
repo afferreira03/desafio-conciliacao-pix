@@ -22,8 +22,9 @@ expondo relatórios via API REST.
 10. [Observabilidade](#10-observabilidade)
 11. [Estratégia de testes](#11-estratégia-de-testes)
 12. [Decisões técnicas e trade-offs](#12-decisões-técnicas-e-trade-offs)
-13. [Limitações e evoluções](#13-limitações-e-evoluções)
-14. [Uso de IA](#14-uso-de-ia)
+13. [Evolução cloud-first e escala horizontal](#13-evolução-cloud-first-e-escala-horizontal)
+14. [Limitações e evoluções](#14-limitações-e-evoluções)
+15. [Uso de IA](#15-uso-de-ia)
 
 ---
 
@@ -491,24 +492,120 @@ integração (`*IT`, via failsafe; requer Docker).
 
 ## 12. Decisões técnicas e trade-offs
 
-| Decisão | Motivo | Custo / alternativa |
-|---|---|---|
-| Monólito modular (Spring Modulith) + hexagonal | Entrega viável no prazo com fronteiras claras; domínio testável sem infra | Microsserviços: deploy/escala independentes, mas alto custo operacional para o escopo |
-| MongoDB (replica set) | Transações multi-documento (registro + fatura + outbox atômicos), agregações para o relatório, esquema flexível para evoluir o registro e **sharding horizontal nativo** para o volume do NFR | Relacional (PostgreSQL): ACID e constraints mais ricos, mas a escala de escrita exige particionamento/sharding externo; transações Mongo têm custo maior que escritas simples (visível no teste de carga) |
-| Redpanda | API Kafka, binário único, leve para dev | Em produção: Kafka gerenciado (ex.: MSK) — código não muda |
-| Outbox por polling | Simples, sem infraestrutura extra | CDC (Debezium / change streams) em volumes maiores; múltiplas instâncias do relay publicam duplicados (at-least-once) |
-| Idempotência por verificação + índice único | Sem tabela de inbox extra | Inbox dedicada permitiria auditoria de mensagens recebidas |
-| Sem Resilience4j | Prazo; os mecanismos nativos cobrem retry, DLQ, timeout, idempotência | Circuit breaker desnecessário: não há dependência externa síncrona instável no escopo |
-| Sem Keycloak / controle de acesso | Prazo | Proposta na seção 9 |
-| Sem GraalVM Native Image | Custo de configuração (reflection, Kafka/Mongo) × ganho de startup/memória | Evolução para ambientes com scale-to-zero |
-| Sem Grafana/OpenTelemetry | Prazo; Actuator + endpoint Prometheus já expõem as métricas | Tracing distribuído e dashboards como evolução |
-| Sem correlação de logs (MDC) | Prazo; cortado na priorização final | MDC com `endToEndId` no consumer (e propagado via header Kafka) |
-| Demonstração de vazão por burst + ritmo constante | Um notebook não representa um cluster; medição honesta + argumento de escala | Teste de carga sustentado em ambiente dimensionado |
-| Mongo local sem autenticação | Replica set + auth exige `--keyFile`; simplifica o dev | Autenticação, TLS e keyfile em qualquer ambiente real |
+Cada decisão com o que se ganha, o que se paga e para onde ela evolui num cenário cloud-first com escala horizontal
+(o roteiro completo está na [seção 13](#13-evolução-cloud-first-e-escala-horizontal)).
+
+### Arquitetura e dados
+
+| Decisão | Ganho | Trade-off (o que se paga) | Evolução cloud-first / escala horizontal |
+|---|---|---|---|
+| **Monólito modular** (Spring Modulith) + **hexagonal** | Um artefato, um deploy; fronteiras verificadas por teste; domínio sem framework | Módulos não escalam nem fazem deploy de forma independente | Mesmo artefato em **dois deployments** (worker Kafka × API de leitura) escalando separadamente; extrair um módulo para serviço só quando houver motivo medido — as fronteiras já existem |
+| **MongoDB** (replica set) | Transação multi-documento (registro + fatura + outbox), agregação para relatório, esquema flexível, **sharding nativo** | Transação custa mais que escrita simples: é o gargalo medido (~6,4 comandos e ~18 ms por conciliação) | Serviço gerenciado (ex.: MongoDB Atlas) multi-AZ; sharding com chave que **co-localize** fatura e conciliação (transação entre shards custa mais); leituras de relatório em réplicas secundárias |
+| **Transação por mensagem** (registro + fatura + outbox) | Atomicidade simples de raciocinar; sem estado intermediário | ~6 round-trips e um flush de journal por Pix | Listener em lote + `bulkWrite` (uma transação por lote); ou modelo sem transação multi-documento (outbox embutido) — seção 8 |
+| **Compare-and-set** na fatura (em vez de lock) | Sem lock distribuído; conflito vira rollback + retry + `INVOICE_ALREADY_PAID` | Conflitos custam uma retentativa (1 s de backoff) | Continua válido com N instâncias e shards — não depende de estado local |
+| **Idempotência** por verificação prévia + índice único | Sem tabela de inbox; reentrega não gera efeito duplicado | Uma leitura extra por mensagem | Inserir direto e tratar a chave duplicada fora da transação (−1 round-trip); inbox dedicada se houver requisito de auditoria |
+
+### Mensageria
+
+| Decisão | Ganho | Trade-off (o que se paga) | Evolução cloud-first / escala horizontal |
+|---|---|---|---|
+| **Kafka** (Redpanda em dev) | Log durável, reprocessável, particionado; API padrão de mercado | Operar broker é caro fora de serviço gerenciado | Kafka gerenciado (ex.: Amazon MSK, Confluent Cloud) — o código não muda |
+| **Chave de partição = `txId`** | Ordem garantida por fatura (segundo pagamento sempre depois do primeiro) | Paralelismo máximo = nº de partições; partições não diminuem | Dimensionar partições para o pico com folga (ex.: 48–96); **autoscaling de consumers pelo lag** (ex.: KEDA) até o nº de partições |
+| **Outbox por polling** | Sem infraestrutura extra; entrega garantida do resultado | Uma escrita por evento para marcar `SENT`; com várias instâncias, os relays competem e duplicam eventos | Relay em lote; **uma única instância ativa** (eleição de líder, ex.: lease do Kubernetes) ou **CDC** (change streams / Debezium) |
+| **Entrega at-least-once** do resultado | Nunca perde evento | Consumidor do resultado precisa ser idempotente por `endToEndId` | Mantido; contrato documentado e DTO de integração versionado com schema registry |
+| **Retry nativo + DLT** (sem Resilience4j) | Menos dependências; cobre retry, DLQ, timeout, idempotência | Sem circuit breaker (não há dependência síncrona instável no escopo) | Replay do DLT como ferramenta operacional; circuit breaker só se surgir integração síncrona externa |
+
+### Operação, segurança e qualidade
+
+| Decisão | Ganho | Trade-off (o que se paga) | Evolução cloud-first / escala horizontal |
+|---|---|---|---|
+| **Métricas via porta** (Micrometer + Prometheus) | Evidência dos NFRs (latência, status, duplicatas) sem acoplar a aplicação | Sem dashboards nem tracing | OpenTelemetry → backend gerenciado de métricas/traces/logs; alertas da seção 10 |
+| **Sem Grafana/OpenTelemetry** | Prazo; Actuator já expõe as métricas | Sem visão distribuída de uma transação | Tracing ponta a ponta com propagação de contexto via headers Kafka |
+| **Sem correlação de logs (MDC)** | Prazo | Rastrear um Pix nos logs exige busca por `endToEndId` | MDC com `endToEndId` no consumer e no relay; logs estruturados (JSON) para o agregador da nuvem |
+| **Sem Keycloak / controle de acesso** | Prazo | API de relatórios aberta | OIDC com o provedor de identidade da nuvem (ou Keycloak); papéis de leitura; mTLS/SASL entre serviços e broker |
+| **Mongo local sem autenticação** | Replica set + auth exige `--keyFile`; simplifica o dev | Inseguro fora do ambiente local | Autenticação, TLS, criptografia em repouso e segredos em cofre (ex.: AWS Secrets Manager / Vault) |
+| **Sem GraalVM Native Image** | Evita configuração de reflection (Kafka/Mongo) | Startup e memória maiores de JVM | Avaliar nativo se o autoscaling precisar de partida rápida ou scale-to-zero |
+| **Testcontainers** nos testes de integração | Testa contra Mongo/Kafka reais, inclusive o rollback | Build mais lento; exige Docker na esteira | Rodar `mvn verify` na esteira de CI em todo PR |
+| **Demonstração de vazão por burst + ritmo constante** | Medição honesta num notebook + argumento de escala | Não prova 2k–7k TPS sustentados | Teste de carga sustentado em ambiente dimensionado, antes de cada mudança de capacidade |
 
 ---
 
-## 13. Limitações e evoluções
+## 13. Evolução cloud-first e escala horizontal
+
+### O que já está pronto para a nuvem
+
+- **Aplicação sem estado**: todo estado está no MongoDB e no Kafka; qualquer instância processa qualquer mensagem.
+- **Garantias no banco, não na instância**: idempotência (índice único por `endToEndId`), compare-and-set na fatura e
+  outbox transacional dependem só do MongoDB, então valem com N réplicas. Validado sob carga com 6–12 consumers
+  concorrentes numa instância; várias instâncias ainda não foram testadas (o relay do outbox, em particular, precisa
+  de uma única instância ativa — ver abaixo).
+- **Configuração externa**: partições e threads por variável de ambiente (`PIX_PARTITIONS`, `PIX_CONCURRENCY`).
+- **Health probes**: Actuator já expõe os grupos `liveness` e `readiness`.
+- **Métricas no formato Prometheus**, incluindo a latência com SLO de 2 s.
+
+### Arquitetura-alvo
+
+```mermaid
+flowchart LR
+    PSP[Origem das transações Pix] --> K
+
+    subgraph Cloud["Nuvem — multi-AZ"]
+        subgraph K8s["Kubernetes (ou serviço de contêineres gerenciado)"]
+            W["Deployment worker<br/>N réplicas<br/>autoscaling por lag (KEDA)"]
+            R["Relay do outbox<br/>1 ativo (lease) ou CDC"]
+            A["Deployment API<br/>autoscaling por CPU/RPS"]
+        end
+        K[("Kafka gerenciado<br/>pix.transactions — 48+ partições")]
+        M[("MongoDB gerenciado<br/>sharded, multi-AZ")]
+        RES[("pix.reconciliation.result")]
+        OBS["Métricas · traces · logs<br/>(OpenTelemetry)"]
+        IDP["Provedor de identidade (OIDC)"]
+        SEC["Cofre de segredos / KMS"]
+    end
+
+    K --> W --> M
+    R --> M
+    R --> RES
+    GW[API Gateway] --> A
+    IDP -.-> GW
+    A -->|leituras em secundárias| M
+    W & A & R -.-> OBS
+    SEC -.-> W & A & R
+```
+
+O mesmo artefato roda em **três papéis** (worker, relay, API), ativados por perfil/configuração, cada um escalando
+pelo seu próprio sinal.
+
+### Como cada camada escala
+
+| Camada | Como escala horizontalmente | Limite | Sinal de autoscaling |
+|---|---|---|---|
+| Worker (consumer Kafka) | Mais réplicas no mesmo consumer group | Nº de partições de `pix.transactions` | Lag do consumer group |
+| Kafka | Mais partições e brokers (gerenciado) | Partições não diminuem; rebalanceamento ao aumentar | Throughput por partição |
+| MongoDB | Sharding (chave hash que co-localize fatura e conciliação, ex.: `txId`) | Transações entre shards custam mais; o fallback por chave Pix vira consulta em todos os shards | CPU/latência por shard |
+| Relay do outbox | Não escala por réplica (1 ativo) → lote maior ou CDC | Vazão de um relay; com CDC, o limite passa a ser o change stream | Idade do evento `PENDING` mais antigo |
+| API de relatórios | Réplicas sem estado atrás do gateway | Agregações no primário → mover para secundárias ou visão pré-agregada | CPU / requisições por segundo |
+
+### Roteiro em fases
+
+Cada fase só começa quando a métrica da fase anterior indicar necessidade — sem antecipar complexidade.
+
+| Fase | Objetivo | O que muda | Gatilho para a próxima fase |
+|---|---|---|---|
+| **0 — Hoje** | Provar corretude e medir | Monólito modular, 1 instância, Docker Compose | — |
+| **1 — Pronto para nuvem** | Rodar em produção sem mudar a arquitetura | Imagem OCI (`mvn spring-boot:build-image`); segredos em cofre; autenticação/TLS no Mongo e no Kafka; OIDC na API; fábricas Kafka via `ConnectionDetails`; graceful shutdown; logs JSON + MDC; Swagger desligado | Primeiro deploy estável com alertas da seção 10 |
+| **2 — Serviços gerenciados + escala de consumers** | Absorver o pico com mais réplicas | Kubernetes multi-AZ; Kafka e MongoDB gerenciados; partições dimensionadas para o pico; workers com autoscaling por lag; relay com uma instância ativa | CPU/latência do MongoDB saturando antes do pico (como no teste de carga) |
+| **3 — Tirar o gargalo do banco** | Menos round-trips por Pix | Listener em lote + `bulkWrite`; relay em lote ou CDC; `insert` no lugar de `save()`; idempotência sem leitura prévia (seção 8) | Um replica set não atende mesmo com lotes |
+| **4 — Escala horizontal do dado** | Throughput de escrita além de um nó | Sharding do MongoDB; separação worker × API; relatórios em réplicas secundárias ou visão pré-agregada | Necessidade de escalar/entregar módulos de forma independente |
+| **5 — Serviços e resiliência regional** | Autonomia por domínio e recuperação de desastre | Extrair módulos para serviços nas fronteiras já verificadas pelo Spring Modulith; DR em outra região (ativo-passivo) | — |
+
+**Custos e riscos a acompanhar**: mais partições e shards aumentam custo e complexidade operacional; autoscaling por
+lag precisa de limites (máx. réplicas = partições) para não pressionar o banco além do que ele absorve — escalar
+consumers sem a fase 3 só move o gargalo para o MongoDB, como mostrou o teste 12 × 12.
+
+---
+
+## 14. Limitações e evoluções
 
 - Pix `PENDENTE` não é reprocessado quando a fatura chega depois → job/evento de reconciliação tardia (o
   reprocessamento precisa contornar a idempotência por `endToEndId`, que hoje devolve o registro existente).
@@ -525,6 +622,6 @@ integração (`*IT`, via failsafe; requer Docker).
 
 ---
 
-## 14. Uso de IA
+## 15. Uso de IA
 
 Detalhado em [docs/USO-DE-IA.md](docs/USO-DE-IA.md): em que momentos, para quê e o que foi decisão/implementação própria.

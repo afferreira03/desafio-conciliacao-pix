@@ -148,7 +148,10 @@ durante a discussão. Destacar `ReconciliationFlowIT.compareAndSetRollsBackWhole
 - 2 s atendido abaixo da capacidade; burst = fila. Capacidade medida ~300/s em um nó Docker Desktop.
 - Dobrar consumers não escalou → gargalo no banco → evolução concreta, não genérica.
 
-**Limitações honestas** (README seção 13)
+**Evolução** (README seção 13): roteiro em fases até cloud-first e escala horizontal — cada fase com gatilho medido;
+lembrar que escalar consumers sem aliviar o banco só move o gargalo (teste 12 × 12).
+
+**Limitações honestas** (README seção 14)
 - `PENDENTE` não é reprocessado quando a fatura chega depois (conflita com a idempotência — precisa de um fluxo
   próprio de reconciliação tardia).
 - Sem replay do DLT, sem expurgo do outbox, contrato de evento acoplado ao domínio.
