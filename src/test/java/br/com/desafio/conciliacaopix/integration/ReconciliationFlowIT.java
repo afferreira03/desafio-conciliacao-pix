@@ -7,6 +7,7 @@ import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadInv
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.SaveReconciliationPort;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.Invoice;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.PixTransaction;
+import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InconsistencyReason;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InvoiceStatus;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.Money;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.ReconciliationStatus;
@@ -26,6 +27,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -59,6 +62,7 @@ import static org.springframework.data.mongodb.core.query.Query.query;
 class ReconciliationFlowIT {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
+    private static final Logger LOG = LoggerFactory.getLogger(ReconciliationFlowIT.class);
 
     @Autowired
     private ManageInvoiceUseCase invoiceUseCase;
@@ -157,7 +161,48 @@ class ReconciliationFlowIT {
         assertThat(invoice(txId).getStatus()).isEqualTo(InvoiceStatus.PAGA);
     }
 
+    @Test
+    @DisplayName("Compare-and-set sob concorrência real: 6 pagamentos simultâneos da mesma fatura conciliam exatamente um")
+    void concurrentPaymentsForSameInvoiceConcileExactlyOnce() throws Exception {
+        String txId = newTxId();
+        createInvoice(txId, "75.00");
+        int payments = 6; // = partições de pix.transactions = threads do consumer
+        double listenerFailuresBefore = listenerFailures();
+
+        // Cada pagamento vai para uma partição diferente, ignorando de propósito a chave txId: as 6 threads do
+        // consumer disputam a mesma fatura ao mesmo tempo (ex.: um produtor que não particiona por txId).
+        for (int partition = 0; partition < payments; partition++) {
+            String e2e = newEndToEndId();
+            kafka.send(topics.pixTransactions(), partition, e2e, pixJson(e2e, txId, "75.00"));
+        }
+        kafka.flush();
+
+        // Qualquer que seja a intercalação: um vence o compare-and-set; os demais fazem rollback, são reprocessados
+        // pelo retry e encontram a fatura PAGA. Se algum esgotasse as retentativas, iria ao DLT sem registro e a
+        // contagem abaixo falharia.
+        await().atMost(TIMEOUT).untilAsserted(() -> {
+            List<ReconciliationDocument> records = mongo.find(query(where("txId").is(txId)), ReconciliationDocument.class);
+            assertThat(records).hasSize(payments);
+            assertThat(records).filteredOn(r -> r.getStatus() == ReconciliationStatus.CONCILIADO).hasSize(1);
+            assertThat(records).filteredOn(r -> r.getStatus() == ReconciliationStatus.INCONSISTENTE)
+                    .hasSize(payments - 1)
+                    .allSatisfy(r -> assertThat(r.getInconsistencyReason()).isEqualTo(InconsistencyReason.INVOICE_ALREADY_PAID));
+        });
+        assertThat(invoice(txId).getStatus()).isEqualTo(InvoiceStatus.PAGA);
+
+        // Evidência (sem asserção, para não tornar o teste instável): tentativas que falharam por conflito e foram
+        // reprocessadas pelo retry. > 0 mostra que a disputa realmente aconteceu nesta execução.
+        LOG.info("Compare-and-set concorrente: {} tentativa(s) com falha reprocessada(s) pelo retry",
+                (long) (listenerFailures() - listenerFailuresBefore));
+    }
+
     // --- helpers ---
+
+    private double listenerFailures() {
+        return meterRegistry.find("spring.kafka.listener").tag("result", "failure").timers().stream()
+                .mapToDouble(timer -> timer.count())
+                .sum();
+    }
 
     private void createInvoice(String txId, String amount) {
         invoiceUseCase.create(new CreateInvoiceCommand(txId, Money.of(new BigDecimal(amount)), "it@demo.com",
