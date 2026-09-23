@@ -3,6 +3,7 @@ package br.com.desafio.conciliacaopix.reconciliation.domain.model;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InvoiceStatus;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.Money;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.TxId;
+import com.fasterxml.uuid.Generators;
 import lombok.Getter;
 
 import java.time.Instant;
@@ -24,6 +25,31 @@ public class Invoice {
         this.status = Objects.requireNonNull(status, "Status cannot be null");
         this.createdAt = Objects.requireNonNull(createdAt, "CreatedAt cannot be null");
         this.expirationDate = Objects.requireNonNull(expirationDate, "ExpirationDate cannot be null");
+    }
+
+    /**
+     * Abre uma nova fatura (status ABERTA), aguardando pagamento até {@code expirationDate}.
+     */
+    public static Invoice open(TxId txId, Money amount, Instant expirationDate) {
+        Objects.requireNonNull(amount, "Amount cannot be null");
+        Objects.requireNonNull(expirationDate, "ExpirationDate cannot be null");
+        Instant now = Instant.now();
+
+        if (!amount.isGreaterThan(Money.ZERO)) {
+            throw new IllegalArgumentException("Valor da fatura deve ser maior que zero.");
+        }
+        if (!expirationDate.isAfter(now)) {
+            throw new IllegalArgumentException("Data de expiração da fatura deve ser futura.");
+        }
+
+        return new Invoice(
+                Generators.timeBasedEpochGenerator().generate().toString(),
+                txId,
+                amount,
+                InvoiceStatus.ABERTA,
+                now,
+                expirationDate
+        );
     }
 
     public boolean isExpired(Instant reference) {

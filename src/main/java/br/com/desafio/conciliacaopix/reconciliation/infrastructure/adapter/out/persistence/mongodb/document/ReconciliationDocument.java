@@ -7,13 +7,20 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.CompoundIndexes;
 import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.index.IndexDirection;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 
 @Document(collection = "reconciliations")
+@CompoundIndexes({
+        @CompoundIndex(name = "idx_status_createdAt", def = "{'status': 1, 'createdAt': -1}"),
+        @CompoundIndex(name = "idx_status_reason_createdAt", def = "{'status': 1, 'inconsistencyReason': 1, 'createdAt': -1}")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -31,6 +38,8 @@ public class ReconciliationDocument {
     private BigDecimal expectedAmount;
     private ReconciliationStatus status;
     private InconsistencyReason inconsistencyReason;
+
+    @Indexed(direction = IndexDirection.DESCENDING)
     private Instant createdAt;
 
     public static ReconciliationDocument fromDomain(ReconciliationRecord reconciliationRecord) {
@@ -50,9 +59,9 @@ public class ReconciliationDocument {
         return ReconciliationRecord.restore(
                 reconciliationDocument.getId(),
                 EndToEndId.of(reconciliationDocument.getEndToEndId()),
-                TxId.of(reconciliationDocument.getTxId()),
+                reconciliationDocument.getTxId() != null ? TxId.of(reconciliationDocument.getTxId()) : null,
                 Money.of(reconciliationDocument.getTransactionAmount()),
-                Money.of(reconciliationDocument.getExpectedAmount()),
+                reconciliationDocument.getExpectedAmount() != null ? Money.of(reconciliationDocument.getExpectedAmount()) : null,
                 reconciliationDocument.getStatus(),
                 reconciliationDocument.getInconsistencyReason(),
                 reconciliationDocument.getCreatedAt()

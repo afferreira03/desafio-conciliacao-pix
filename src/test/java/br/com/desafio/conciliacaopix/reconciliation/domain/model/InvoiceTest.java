@@ -30,6 +30,28 @@ class InvoiceTest {
     }
 
     @Test
+    @DisplayName("Deve abrir nova fatura com status ABERTA, id gerado e data de criação")
+    void shouldOpenNewInvoice() {
+        var expiration = Instant.now().plus(1, ChronoUnit.DAYS);
+
+        var invoice = Invoice.open(TxId.of("TX123"), Money.of(150.00), expiration);
+
+        assertThat(invoice.getStatus()).isEqualTo(InvoiceStatus.ABERTA);
+        assertThat(invoice.getId()).isNotBlank();
+        assertThat(invoice.getCreatedAt()).isBefore(expiration);
+        assertThat(invoice.getExpirationDate()).isEqualTo(expiration);
+    }
+
+    @Test
+    @DisplayName("Deve rejeitar abertura de fatura com valor zero ou expiração no passado")
+    void shouldRejectInvalidInvoiceOpening() {
+        assertThatThrownBy(() -> Invoice.open(TxId.of("TX123"), Money.ZERO, Instant.now().plus(1, ChronoUnit.DAYS)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Invoice.open(TxId.of("TX123"), Money.of(150.00), Instant.now().minus(1, ChronoUnit.MINUTES)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     @DisplayName("Deve marcar fatura ABERTA como PAGA")
     void shouldMarkOpenInvoiceAsPaid() {
         var invoice = createInvoice(InvoiceStatus.ABERTA, NOW.plus(1, ChronoUnit.DAYS));

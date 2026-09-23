@@ -12,6 +12,10 @@ spring:
     mongodb:
       auto-index-creation: true
 
+  mvc:
+    problemdetails:
+      enabled: true
+
   kafka:
     bootstrap-servers: localhost:19092
     consumer:
@@ -28,6 +32,15 @@ app:
     outbox:
       send-timeout-ms: 30000
       poll-interval-ms: 5000
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: method
+  paths-to-match: /api/**
 
 management:
   endpoints:
