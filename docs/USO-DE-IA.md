@@ -1,10 +1,9 @@
 # Uso de IA no desenvolvimento
 
-> Documento preparado com apoio da própria IA a partir do histórico das sessões e revisado por mim. Itens marcados
-> **[confirmar]** dependem de informação que só eu posso validar e devem ser revisados antes da entrega.
+> Documento preparado com apoio da própria IA a partir do histórico das sessões, revisado e confirmado por mim.
 
 **Ferramenta**: Claude (Anthropic) — conversas de arquitetura e revisão ao longo do projeto e, na reta final, Claude
-Code (CLI) com acesso ao repositório. **[confirmar]** outras ferramentas usadas (ex.: assistente da IDE), se houver.
+Code (CLI) com acesso ao repositório. Nenhuma outra ferramenta de IA foi usada.
 
 **Modo de trabalho combinado**: na maior parte do projeto a IA atuou como **tutora/revisora** — explicações,
 referências e revisão de código, com a implementação feita por mim. Nos dois últimos dias, por causa do prazo, pedi
@@ -18,19 +17,19 @@ a meu pedido". Em todos os casos, o plano de cada etapa foi aprovado por mim ant
 
 | Momento | Uso da IA | Decisão / trabalho próprio |
 |---|---|---|
-| Leitura do case | Discussão dos NFRs e do que priorizar num prazo de 7 dias | Priorização final do escopo **[confirmar]** |
+| Leitura do case | Discussão dos NFRs e do que priorizar num prazo de 7 dias | Priorização final do escopo |
 | Stack inicial | Crítica da proposta (Spring Boot + GraalVM + Keycloak + Mongo + Kafka): recomendação de tratar GraalVM e Keycloak como trade-offs documentados | Decisão de não implementar GraalVM/Keycloak/Grafana e documentá-los |
 | Padrões de mensageria | Correção conceitual: **Outbox** protege a *publicação*; **Inbox / Idempotent Consumer** protege o *consumo* | Adoção dos dois padrões |
-| Estilo arquitetural | Sugestão de monólito modular + hexagonal | Adoção e organização dos pacotes **[confirmar]** |
+| Estilo arquitetural | Sugestão de monólito modular + hexagonal | Adoção e organização dos pacotes |
 | Resiliência | Mapeamento de mecanismos nativos do Spring equivalentes ao Resilience4j (retry, DLQ, idempotência, timeouts) | Decisão de não usar Resilience4j |
-| Modelagem DDD | Discussão de agregado, value objects e eventos de domínio | Modelagem de `Invoice`, `ReconciliationRecord`, VOs e eventos selados **[confirmar]** |
+| Modelagem DDD | Discussão de agregado, value objects e eventos de domínio | Modelagem de `Invoice`, `ReconciliationRecord`, VOs e eventos selados |
 
 ## 2. Infraestrutura local
 
 | Momento | Uso da IA | Decisão / trabalho próprio |
 |---|---|---|
 | Docker Compose do MongoDB | Diagnóstico de falhas de inicialização: `MONGO_INITDB_ROOT_*` ativa `--auth`, e replica set + auth exige `--keyFile` | Remoção da autenticação local, documentada como trade-off; serviço `mongo-init` idempotente |
-| Redpanda Console | Correção da imagem do console | Configuração do compose **[confirmar]** |
+| Redpanda Console | Correção da imagem do console | Configuração do compose |
 
 ## 3. Implementação e revisão de código
 
@@ -55,7 +54,7 @@ executado com minha autorização comando a comando e commitado separadamente.
 | Diagnóstico de desempenho | Mostrou que a latência do burst era fila, que 12 × 12 não escalava e que o gargalo é o MongoDB (não o consumer); paralelismo tornou-se configurável | Decisão de limitar o diagnóstico ao time-box e documentar as evoluções |
 | Testes de arquitetura | `ApplicationModules.verify()` + regras hexagonais com ArchUnit | Revisão |
 | Testes de integração | Testcontainers (Mongo replica set + Redpanda): fluxo completo, idempotência, DLT, rollback real do compare-and-set | Revisão |
-| Documentação | Preenchimento do README (diagramas Mermaid, resultados, trade-offs), roteiro da demo, este documento | Revisão final do texto **[confirmar]** |
+| Documentação | Preenchimento do README (diagramas Mermaid, resultados, trade-offs), roteiro da demo, este documento | Revisão final do texto |
 
 **Achados relevantes da IA nessa etapa** (todos verificados pela execução):
 - Testcontainers 2.x não sobe o MongoDB como replica set por padrão (`withReplicaSet()`), sem o que as transações
@@ -68,12 +67,33 @@ executado com minha autorização comando a comando e commitado separadamente.
 - A inconsistência de nomes `amount` × `transactionAmount` nos eventos já tinha sido corrigida no código; a pendência
   foi removida da documentação.
 
+### Tarde de 23/09 — ajustes pós-ensaio e investigação do MongoDB
+
+| Momento | Uso da IA | Minha participação / decisão |
+|---|---|---|
+| Mensagens de erro 400 | Pedi que o 400 de validação listasse os campos inválidos. **Implementado pela IA**: propriedade `errors` (campo + mensagem) no ProblemDetail, para corpo e query params, sem devolver o valor rejeitado (pode conter a chave Pix) | Pedido da mudança; aprovação da decisão de não ecoar o valor rejeitado |
+| Valores exibidos como `150.0` | Pedi a correção. A IA verificou as respostas brutas antes de alterar código: a API já devolvia `150.00`; o `150.0` vinha do `Invoke-RestMethod` do PowerShell, usado no roteiro da demo. Correção no roteiro (helper que mostra o JSON bruto) + teste que fixa o formato. Ao testar o helper, achou outro problema: respostas `application/problem+json` chegam como bytes no PowerShell | Pedido; aprovação da correção no roteiro em vez de mudança na API |
+| Desempenho do MongoDB | Perguntei como melhorar o banco, apontado como gargalo. A IA propôs caminhos priorizados por ganho × risco e recomendou medir antes de otimizar | **Escolhi** medir (#1) e testar a atualização em lote do relay do outbox (#2) |
+| Medição | Detalhamento por comando a partir do timer `mongodb.driver.commands`: ~6,4 comandos e ~18 ms de Mongo por conciliação; `commitTransaction` (~6 ms, 32 %) é o maior custo isolado; operações simples a ~2 ms | Aprovação de cada execução |
+| Atualização em lote do relay | Implementada e validada por teste de integração; a comparação antes × depois foi inconclusiva (todos os comandos ficaram mais lentos, inclusive os não afetados → ruído do ambiente) | Escolhi repetir com um experimento A/B (3 rodadas alternadas por variante) |
+| Resultado final | O experimento A/B saiu **inválido por erro da IA** (ver abaixo). A IA identificou e reportou o erro pelos próprios números | **Decidi desfazer a mudança de código** e registrar no README o custo medido e os caminhos de otimização priorizados, sem prometer ganho não comprovado |
+
+**Erros da IA nesta etapa** (identificados e corrigidos antes da entrega):
+- No resumo do ensaio da demo, a IA apontou "valores aparecem como `150.0`" como problema da API sem verificar; a
+  investigação posterior mostrou que era artefato do PowerShell.
+- No experimento A/B, o script da IA copiava os fontes com `Copy-Item`, que preserva a data de modificação; o build
+  incremental do Maven não recompilou a variante nova, e as duas versões testadas eram a original. A IA percebeu pelo
+  número de escritas do relay (igual nas duas variantes), invalidou o experimento e fez build limpo (`mvn clean`)
+  antes de continuar.
+- O experimento serviu para uma conclusão: rodadas idênticas variaram de 215 a 287 conciliações/s neste notebook,
+  então ganhos de 10–20 % não são mensuráveis de forma confiável nesse ambiente — registrado no README.
+
 ## 5. Documentação
 
 | Momento | Uso da IA | Decisão / trabalho próprio |
 |---|---|---|
-| README | Esqueleto e, na reta final, texto completo gerado pela IA a partir das decisões e dos resultados medidos | Revisão **[confirmar]** |
-| Este documento | Gerado pela IA a partir do histórico | Revisão **[confirmar]** |
+| README | Esqueleto e, na reta final, texto completo gerado pela IA a partir das decisões e dos resultados medidos | Revisão |
+| Este documento | Gerado pela IA a partir do histórico | Revisão e confirmação |
 
 ---
 
@@ -85,5 +105,6 @@ executado com minha autorização comando a comando e commitado separadamente.
 - Nenhum comando foi executado sem autorização, e nenhum commit foi feito sem meu aval.
 - Toda sugestão foi validada: testes executados localmente, testes de integração com Testcontainers e verificação
   manual no ambiente Docker.
-- **[confirmar]** decisões tomadas sem apoio da IA e casos em que uma sugestão da IA foi rejeitada ou corrigida por
-  mim.
+- Mudança da IA que descartei: a atualização em lote do relay do outbox foi implementada e testada, mas desfeita por
+  decisão minha, porque o ganho não pôde ser comprovado e a entrega era no dia seguinte; ficou como evolução
+  documentada.
