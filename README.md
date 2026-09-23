@@ -283,7 +283,9 @@ DLT e a latência (p50/p95/p99 e % dentro do SLO de 2 s). O resultado está na [
 ## 5. API REST
 
 Documentação interativa em `/swagger-ui.html`. Erros no formato **ProblemDetail (RFC 9457)**; erros de validação
-(corpo ou query params) trazem a lista de violações — sem ecoar o valor rejeitado, que pode conter dado pessoal:
+(corpo ou query params) trazem a lista de violações — sem ecoar o valor rejeitado, que pode conter dado pessoal. As
+mensagens saem sempre em português (`spring.web.locale: pt_BR` com resolver fixo), independente do locale da JVM ou
+do sistema operacional — um container Linux, por padrão, responderia em inglês:
 
 ```json
 {

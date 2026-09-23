@@ -16,6 +16,11 @@ spring:
     problemdetails:
       enabled: true
 
+  # Mensagens de validação sempre em português, independente do locale da JVM (container Linux = inglês).
+  web:
+    locale: pt_BR
+    locale-resolver: fixed
+
   kafka:
     bootstrap-servers: localhost:19092
     consumer:
