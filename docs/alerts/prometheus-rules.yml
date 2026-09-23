@@ -1,7 +1,7 @@
 # Regras de alerta (Prometheus) para a conciliação Pix.
 #
 # Todas as métricas dos grupos 1 a 4 foram conferidas no /actuator/prometheus da aplicação (Micrometer).
-# O grupo 5 depende de fontes que a aplicação ainda NÃO exporta (exporter Kafka / métrica nova) — ver comentários.
+# O grupo 5 depende de fonte externa que a aplicação NÃO exporta (lag do consumer via exporter Kafka / MSK).
 # Validação de sintaxe: promtool check rules docs/alerts/prometheus-rules.yml
 #
 # Limiares são pontos de partida: calibrar com o comportamento real em produção.
@@ -143,6 +143,16 @@ groups:
           summary: "Relay do outbox não está executando"
           description: "Nenhuma execução do poll em 5 min: resultados não estão sendo publicados."
 
+      - alert: OutboxEventoPendenteAntigo
+        # Gauge calculado a cada scrape (OutboxBacklogMetrics), independente do relay: cresce também se o relay parar.
+        expr: pix_outbox_oldest_pending_age_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Evento de resultado pendente há mais de 1 min no outbox"
+          description: "O evento mais antigo espera há {{ $value | humanizeDuration }}; consumidores de pix.reconciliation.result estão atrasados."
+
       - alert: MongoCommitLento
         expr: |
           sum(rate(mongodb_driver_commands_seconds_sum{command="commitTransaction"}[5m]))
@@ -183,7 +193,7 @@ groups:
         annotations:
           summary: "Instância da conciliação sem responder ao scrape"
 
-  # 5. Requer fonte externa ou métrica nova (NÃO exportado pela aplicação hoje)
+  # 5. Requer fonte externa (NÃO exportado pela aplicação)
   - name: pix-reconciliation-external
     rules:
       - alert: PixLagDoConsumerAlto
@@ -196,12 +206,3 @@ groups:
         annotations:
           summary: "Lag do consumer acima de ~2 s de fila na vazão média"
           description: "Lag = {{ $value }} mensagens. Escalar consumers (até o nº de partições) ou investigar o MongoDB."
-
-      - alert: OutboxEventoPendenteAntigo
-        # Fonte: gauge a ser criado (idade do evento PENDING mais antigo) — evolução documentada no README.
-        expr: pix_outbox_oldest_pending_age_seconds > 60
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Evento de resultado pendente há mais de 1 min no outbox"

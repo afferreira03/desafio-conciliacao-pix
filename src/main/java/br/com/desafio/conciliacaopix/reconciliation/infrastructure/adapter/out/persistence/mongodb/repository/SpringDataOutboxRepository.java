@@ -6,6 +6,7 @@ import org.springframework.data.domain.Limit;
 import org.springframework.data.mongodb.repository.MongoRepository;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface SpringDataOutboxRepository extends MongoRepository<OutboxEventDocument, String> {
 
@@ -14,4 +15,10 @@ public interface SpringDataOutboxRepository extends MongoRepository<OutboxEventD
      * todo o backlog em memória de uma vez. Coberto pelo índice parcial {status, createdAt}.
      */
     List<OutboxEventDocument> findByStatusOrderByCreatedAtAsc(OutboxEventStatus status, Limit limit);
+
+    /**
+     * Evento mais antigo com o status informado (usado pela métrica de idade do backlog do outbox).
+     * Mesmo índice parcial {status, createdAt}.
+     */
+    Optional<OutboxEventDocument> findFirstByStatusOrderByCreatedAtAsc(OutboxEventStatus status);
 }
