@@ -59,6 +59,7 @@ class ReconciliationEngineTest {
 
         assertThat(result.record().getStatus()).isEqualTo(ReconciliationStatus.CONCILIADO);
         assertThat(result.record().getInconsistencyReason()).isNull();
+        assertThat(result.record().getExpectedAmount()).isEqualTo(result.record().getTransactionAmount());
         assertThat(result.updatedInvoice()).isPresent();
         assertThat(result.updatedInvoice().get().getStatus()).isEqualTo(InvoiceStatus.PAGA);
         assertThat(result.event()).isInstanceOf(PixReconciledEvent.class);
@@ -87,7 +88,16 @@ class ReconciliationEngineTest {
 
         assertThat(result.record().getStatus()).isEqualTo(ReconciliationStatus.INCONSISTENTE);
         assertThat(result.record().getInconsistencyReason()).isEqualTo(InconsistencyReason.AMOUNT_MISMATCH);
-        assertThat(result.event()).isInstanceOf(PixInconsistentEvent.class);
+        assertThat(result.record().getTransactionAmount()).isEqualTo(Money.of(149.99));
+        assertThat(result.record().getExpectedAmount()).isEqualTo(Money.of(150.00));
+        assertThat(result.updatedInvoice()).isEmpty();
+        assertThat(invoice.getStatus()).isEqualTo(InvoiceStatus.ABERTA);
+
+        assertThat(result.event()).isInstanceOfSatisfying(PixInconsistentEvent.class, event -> {
+            assertThat(event.expectedAmount()).isEqualTo(Money.of(150.00));
+            assertThat(event.transactionAmount()).isEqualTo(Money.of(149.99));
+            assertThat(event.reason()).isEqualTo(InconsistencyReason.AMOUNT_MISMATCH);
+        });
     }
 
     @Test
@@ -101,6 +111,8 @@ class ReconciliationEngineTest {
 
         assertThat(result.record().getStatus()).isEqualTo(ReconciliationStatus.INCONSISTENTE);
         assertThat(result.record().getInconsistencyReason()).isEqualTo(InconsistencyReason.INVOICE_ALREADY_PAID);
+        assertThat(result.record().getExpectedAmount()).isEqualTo(Money.of(150.00));
+        assertThat(result.updatedInvoice()).isEmpty();
         assertThat(result.event()).isInstanceOf(PixInconsistentEvent.class);
     }
 
@@ -115,6 +127,9 @@ class ReconciliationEngineTest {
 
         assertThat(result.record().getStatus()).isEqualTo(ReconciliationStatus.INCONSISTENTE);
         assertThat(result.record().getInconsistencyReason()).isEqualTo(InconsistencyReason.INVOICE_EXPIRED);
+        assertThat(result.record().getExpectedAmount()).isEqualTo(Money.of(150.00));
+        assertThat(result.updatedInvoice()).isPresent();
+        assertThat(result.updatedInvoice().get().getStatus()).isEqualTo(InvoiceStatus.EXPIRADA);
         assertThat(result.event()).isInstanceOf(PixInconsistentEvent.class);
     }
 
@@ -129,6 +144,8 @@ class ReconciliationEngineTest {
 
         assertThat(result.record().getStatus()).isEqualTo(ReconciliationStatus.INCONSISTENTE);
         assertThat(result.record().getInconsistencyReason()).isEqualTo(InconsistencyReason.INVOICE_CANCELLED);
+        assertThat(result.record().getExpectedAmount()).isEqualTo(Money.of(150.00));
+        assertThat(result.updatedInvoice()).isEmpty();
         assertThat(result.event()).isInstanceOf(PixInconsistentEvent.class);
     }
 
@@ -143,6 +160,8 @@ class ReconciliationEngineTest {
 
         assertThat(result.record().getStatus()).isEqualTo(ReconciliationStatus.INCONSISTENTE);
         assertThat(result.record().getInconsistencyReason()).isEqualTo(InconsistencyReason.INVOICE_EXPIRED);
+        assertThat(result.record().getExpectedAmount()).isEqualTo(Money.of(150.00));
+        assertThat(result.updatedInvoice()).isEmpty();
         assertThat(result.event()).isInstanceOf(PixInconsistentEvent.class);
     }
 

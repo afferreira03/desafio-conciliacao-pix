@@ -12,7 +12,7 @@ public record PixInconsistentEvent(
         String reconciliationId,
         EndToEndId endToEndId,
         TxId txId,
-        Money transactionAmout,
+        Money transactionAmount,
         Money expectedAmount,
         InconsistencyReason reason,
         Instant occurredOn
@@ -21,7 +21,7 @@ public record PixInconsistentEvent(
     public PixInconsistentEvent {
         Objects.requireNonNull(reconciliationId, "reconciliationID");
         Objects.requireNonNull(endToEndId, "endToEndId");
-        Objects.requireNonNull(transactionAmout, "transactionAmout");
+        Objects.requireNonNull(transactionAmount, "transactionAmount");
         Objects.requireNonNull(reason, "reason");
         Objects.requireNonNull(occurredOn, "occurredOn");
     }

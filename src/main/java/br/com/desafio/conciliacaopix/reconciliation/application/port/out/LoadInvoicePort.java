@@ -11,5 +11,6 @@ import java.util.Optional;
 
 public interface LoadInvoicePort {
     Optional<Invoice> findByTxId(TxId txId);
+
     List<Invoice> findPendingCandidatesByFallback(String pixKey, Money amount, Instant paymentTimestamp, Duration window);
 }

@@ -1,10 +1,8 @@
 package br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging.kafka;
 
 import br.com.desafio.conciliacaopix.reconciliation.application.port.in.ReconcilePixTransactionUseCase;
-import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.KafkaTopicsProperties;
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging.kafka.dto.PixTransactionEventDto;
 import lombok.AllArgsConstructor;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
@@ -21,7 +19,7 @@ public class PixTransactionKafkaConsumer {
             groupId = "${spring.kafka.consumer.group-id:pix-reconciliation-group}",
             containerFactory = "kafkaListenerContainerFactory"
     )
-    public void consume(PixTransactionEventDto eventDto){
+    public void consume(PixTransactionEventDto eventDto) {
         log.info("Mensagem Pix recebida do kafka: endToEndId={}, txId={}, ", eventDto.endToEndId(), eventDto.txId());
         useCase.reconcile(eventDto.toCommand());
     }

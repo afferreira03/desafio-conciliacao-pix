@@ -1,8 +1,7 @@
 package br.com.desafio.conciliacaopix.reconciliation.infrastructure.adapter.out.persistence.mongodb.document;
 
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.ReconciliationRecord;
-import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InconsistencyReason;
-import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.ReconciliationStatus;
+import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.*;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -44,6 +43,19 @@ public class ReconciliationDocument {
                 reconciliationRecord.getStatus(),
                 reconciliationRecord.getInconsistencyReason(),
                 reconciliationRecord.getCreatedAt()
+        );
+    }
+
+    public static ReconciliationRecord toDomain(ReconciliationDocument reconciliationDocument) {
+        return ReconciliationRecord.restore(
+                reconciliationDocument.getId(),
+                EndToEndId.of(reconciliationDocument.getEndToEndId()),
+                TxId.of(reconciliationDocument.getTxId()),
+                Money.of(reconciliationDocument.getTransactionAmount()),
+                Money.of(reconciliationDocument.getExpectedAmount()),
+                reconciliationDocument.getStatus(),
+                reconciliationDocument.getInconsistencyReason(),
+                reconciliationDocument.getCreatedAt()
         );
     }
 

@@ -10,7 +10,7 @@ import java.time.Instant;
 public record PixTransactionEventDto(
         @JsonProperty("endToEndId") String endToEndId,
         @JsonProperty("txId") String txId,
-        @JsonProperty("amount") BigDecimal amount,
+        @JsonProperty("transactionAmount") BigDecimal amount,
         @JsonProperty("paymentTimestamp") Instant paymentTimestamp,
         @JsonProperty("pixKey") String pixKey
 ) {

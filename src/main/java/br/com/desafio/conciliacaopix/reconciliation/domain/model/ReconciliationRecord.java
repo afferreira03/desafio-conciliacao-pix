@@ -71,4 +71,17 @@ public class ReconciliationRecord {
                 Instant.now()
         );
     }
+
+    public static ReconciliationRecord restore(String id, EndToEndId endToEndId, TxId txId, Money transactionAmount, Money expectedAmount, ReconciliationStatus status, InconsistencyReason inconsistencyReason, Instant createdAt) {
+        return new ReconciliationRecord(
+                id,
+                endToEndId,
+                txId,
+                transactionAmount,
+                expectedAmount,
+                status,
+                inconsistencyReason,
+                createdAt
+        );
+    }
 }

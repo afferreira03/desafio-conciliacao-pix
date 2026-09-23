@@ -9,15 +9,15 @@ This was a deliberate decision given the project's time budget — do not
 suggest adding Resilience4j. Spring's own ecosystem covers every mechanism
 needed at this project's scope:
 
-| Need | Mechanism |
-|---|---|
-| Declarative retry | Spring Retry (`@Retryable` / `@Backoff`) |
-| Consumer-level retry | `DefaultErrorHandler` + `ExponentialBackOff`/`FixedBackOff` (spring-kafka, native) |
-| Dead-letter queue | `DeadLetterPublishingRecoverer` (spring-kafka, native) |
-| Idempotency (Inbox pattern) | Unique Mongo index on `endToEndId` + catching `DuplicateKeyException` |
+| Need                              | Mechanism                                                                                                                                             |
+|-----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Declarative retry                 | Spring Retry (`@Retryable` / `@Backoff`)                                                                                                              |
+| Consumer-level retry              | `DefaultErrorHandler` + `ExponentialBackOff`/`FixedBackOff` (spring-kafka, native)                                                                    |
+| Dead-letter queue                 | `DeadLetterPublishingRecoverer` (spring-kafka, native)                                                                                                |
+| Idempotency (Inbox pattern)       | Unique Mongo index on `endToEndId` + catching `DuplicateKeyException`                                                                                 |
 | Reliable publish (Outbox pattern) | An outbox document written **atomically** with domain state in the same `@Transactional` call, delivered by a `@Scheduled` poller via `KafkaTemplate` |
-| Timeouts | Explicit config on the Mongo driver / WebClient — not a library concern |
-| Bulkhead | Pool sizing — `concurrency` on `@KafkaListener`, `maxPoolSize` on the Mongo client |
+| Timeouts                          | Explicit config on the Mongo driver / WebClient — not a library concern                                                                               |
+| Bulkhead                          | Pool sizing — `concurrency` on `@KafkaListener`, `maxPoolSize` on the Mongo client                                                                    |
 
 ## Explicitly not implemented, and why
 

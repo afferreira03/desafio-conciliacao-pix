@@ -11,14 +11,14 @@ public record PixPendingEvent(
         String reconciliationId,
         EndToEndId endToEndId,
         TxId txId,
-        Money amount,
+        Money transactionAmount,
         Instant occurredOn
 ) implements DomainEvent {
 
     public PixPendingEvent {
         Objects.requireNonNull(reconciliationId, "ReconciliationId não pode ser vazio/nulo.");
         Objects.requireNonNull(endToEndId, "EndToEndId não pode ser vazio/nulo.");
-        Objects.requireNonNull(amount, "Amount não pode ser vazio/nulo.");
+        Objects.requireNonNull(transactionAmount, "Amount não pode ser vazio/nulo.");
         Objects.requireNonNull(occurredOn, "OccurredOn não pode ser vazio/nulo.");
     }
 

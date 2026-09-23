@@ -8,6 +8,7 @@ import br.com.desafio.conciliacaopix.reconciliation.domain.model.PixTransaction;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.ReconciliationRecord;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InconsistencyReason;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InvoiceStatus;
+import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.Money;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -37,20 +38,24 @@ public class ReconciliationEngine {
         Invoice invoice = invoiceOptional.get();
 
         if (invoice.getStatus() == InvoiceStatus.PAGA) {
-            return createInconsistencyResult(pixTransaction, invoice, InconsistencyReason.INVOICE_ALREADY_PAID);
+            return createInconsistencyResult(pixTransaction, Optional.empty(), invoice.getAmount(), InconsistencyReason.INVOICE_ALREADY_PAID);
         }
 
-        if (invoice.getStatus() == InvoiceStatus.EXPIRADA || invoice.isExpired(pixTransaction.paymentTimestamp())) {
+        if (invoice.getStatus() == InvoiceStatus.ABERTA && invoice.isExpired(pixTransaction.paymentTimestamp())) {
             invoice.markAsExpired(pixTransaction.paymentTimestamp());
-            return createInconsistencyResult(pixTransaction, invoice, InconsistencyReason.INVOICE_EXPIRED);
+            return createInconsistencyResult(pixTransaction, Optional.of(invoice), invoice.getAmount(), InconsistencyReason.INVOICE_EXPIRED);
+        }
+
+        if (invoice.getStatus() == InvoiceStatus.EXPIRADA) {
+            return createInconsistencyResult(pixTransaction, Optional.empty(), invoice.getAmount(), InconsistencyReason.INVOICE_EXPIRED);
         }
 
         if (invoice.getStatus() == InvoiceStatus.CANCELADA) {
-            return createInconsistencyResult(pixTransaction, invoice, InconsistencyReason.INVOICE_CANCELLED);
+            return createInconsistencyResult(pixTransaction, Optional.empty(), invoice.getAmount(), InconsistencyReason.INVOICE_CANCELLED);
         }
 
         if (!pixTransaction.amount().isEqualTo(invoice.getAmount())) {
-            return createInconsistencyResult(pixTransaction, invoice, InconsistencyReason.AMOUNT_MISMATCH);
+            return createInconsistencyResult(pixTransaction, Optional.empty(), invoice.getAmount(), InconsistencyReason.AMOUNT_MISMATCH);
         }
 
         invoice.markAsPaid();
@@ -70,12 +75,12 @@ public class ReconciliationEngine {
         return new ReconciliationResult(reconciliationRecord, Optional.of(invoice), event);
     }
 
-    private ReconciliationResult createInconsistencyResult(PixTransaction pixTransaction, Invoice invoice, InconsistencyReason reason) {
+    private ReconciliationResult createInconsistencyResult(PixTransaction pixTransaction, Optional<Invoice> invoice, Money expectedAmount, InconsistencyReason reason) {
         ReconciliationRecord reconciliationRecord = ReconciliationRecord.createInconsistent(
                 pixTransaction.endToEndId(),
                 pixTransaction.txId(),
                 pixTransaction.amount(),
-                invoice.getAmount(),
+                expectedAmount,
                 reason
         );
 
@@ -87,6 +92,6 @@ public class ReconciliationEngine {
                 reconciliationRecord.getExpectedAmount(),
                 reason
         );
-        return new ReconciliationResult(reconciliationRecord, Optional.of(invoice), pixInconsistentEvent);
+        return new ReconciliationResult(reconciliationRecord, invoice, pixInconsistentEvent);
     }
 }

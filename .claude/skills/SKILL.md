@@ -8,27 +8,27 @@ description: Use when implementing, structuring, or reviewing code in the reconc
 ## Package structure (Spring Modulith)
 
 - Base package: `br.com.desafio.conciliacaopix`.
-- Business modules are **direct subpackages** of the base package
-  (e.g. `reconciliation`) — Spring Modulith derives module boundaries from
+- Business modules are **direct subpackages** of the base package (e.g. `reconciliation`) — Spring Modulith derives
+  module boundaries from
   this, so nothing should sit as a direct sibling that isn't meant to be
   its own module.
 - Within a module, the standard hexagonal split:
-  - `domain/` — model, value objects (`vo/`), domain events (`event/`),
-    domain services. **Zero framework imports allowed here** — no Spring,
-    no Mongo, no Jackson annotations. This is the module's most valuable
-    property; don't compromise it for convenience.
-  - `application/` — use-case services, and `port/in` / `port/out`
-    interfaces (the hexagon's ports).
-  - `infrastructure/` — `adapter/in` (e.g. Kafka consumers),
-    `adapter/out` (e.g. Mongo adapters, Kafka producers), and `config/`.
+    - `domain/` — model, value objects (`vo/`), domain events (`event/`),
+      domain services. **Zero framework imports allowed here** — no Spring,
+      no Mongo, no Jackson annotations. This is the module's most valuable
+      property; don't compromise it for convenience.
+    - `application/` — use-case services, and `port/in` / `port/out`
+      interfaces (the hexagon's ports).
+    - `infrastructure/` — `adapter/in` (e.g. Kafka consumers),
+      `adapter/out` (e.g. Mongo adapters, Kafka producers), and `config/`.
 - Nesting deeper inside `infrastructure` does **not** create new Modulith
   modules — only first-level subpackages of the base package do. Organize
   freely below that level.
 
 ## Conventions to follow
 
-- **Static `fromDomain(...)` factories** on persistence Document classes
-  (see `ReconciliationDocument`, `OutboxEventDocument`) to map a domain
+- **Static `fromDomain(...)` factories** on persistence Document classes (see `ReconciliationDocument`,
+  `OutboxEventDocument`) to map a domain
   object into its storage shape. Since static methods can't receive
   Spring-injected beans, anything requiring a bean (e.g. JSON
   serialization via `ObjectMapper`) must be done by the **caller** and

@@ -28,8 +28,8 @@ replica set, dev), Redpanda (Kafka-compatible), Docker Compose.
 ## Key constraints
 
 - No Resilience4j — resilience is built with Spring-native mechanisms only.
-- GraalVM Native Image, Keycloak, and a Grafana/OTel stack are deliberately
-  **not implemented** — they're documented as justified trade-offs in the
+- GraalVM Native Image, Keycloak, and a Grafana/OTel stack are deliberately **not implemented** — they're documented as
+  justified trade-offs in the
   README instead. Don't suggest implementing them; if asked to write the
   trade-off section, help word the justification instead.
 - Local Mongo runs without `--auth`/`--keyFile` for simplicity — documented

@@ -3,6 +3,7 @@ package br.com.desafio.conciliacaopix.reconciliation.application.service;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.in.ReconcilePixTransactionUseCase;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.in.ReconciliationPixCommand;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadInvoicePort;
+import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadReconciliationPort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.SaveReconciliationPort;
 import br.com.desafio.conciliacaopix.reconciliation.domain.event.PixInconsistentEvent;
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.Invoice;
@@ -11,6 +12,8 @@ import br.com.desafio.conciliacaopix.reconciliation.domain.model.ReconciliationR
 import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.InconsistencyReason;
 import br.com.desafio.conciliacaopix.reconciliation.domain.service.ReconciliationEngine;
 import br.com.desafio.conciliacaopix.reconciliation.domain.service.ReconciliationResult;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.List;
@@ -19,20 +22,30 @@ import java.util.Optional;
 
 public class ReconcilePixTransactionService implements ReconcilePixTransactionUseCase {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ReconcilePixTransactionService.class);
+
     private final ReconciliationEngine reconciliationEngine;
     private final LoadInvoicePort loadInvoicePort;
     private final SaveReconciliationPort saveReconciliationPort;
+    private final LoadReconciliationPort loadReconciliationPort;
 
-    public ReconcilePixTransactionService(ReconciliationEngine reconciliationEngine, LoadInvoicePort loadInvoicePort, SaveReconciliationPort saveReconciliationPort) {
+    public ReconcilePixTransactionService(ReconciliationEngine reconciliationEngine, LoadInvoicePort loadInvoicePort, SaveReconciliationPort saveReconciliationPort, LoadReconciliationPort loadReconciliationPort) {
         this.reconciliationEngine = Objects.requireNonNull(reconciliationEngine, "ReconciliationEngine é obrigatório.");
         this.loadInvoicePort = Objects.requireNonNull(loadInvoicePort, "LoadInvoicePort é obrigatório.");
         this.saveReconciliationPort = Objects.requireNonNull(saveReconciliationPort, "SaveReconciliationPort é obrigatório.");
+        this.loadReconciliationPort = Objects.requireNonNull(loadReconciliationPort, "LoadReconciliationPort é obrigatório");
     }
 
     @Override
     public ReconciliationRecord reconcile(ReconciliationPixCommand command) {
         Objects.requireNonNull(command, "Command não pode ser vazio/nulo.");
         PixTransaction transaction = command.toDomain();
+
+        Optional<ReconciliationRecord> existing = loadReconciliationPort.findByEndToEndId(transaction.endToEndId());
+        if (existing.isPresent()) {
+            LOG.info("Reconcilicação já existe {}.", existing.get().getEndToEndId());
+            return existing.get();
+        }
 
         Optional<Invoice> invoiceOptional;
 

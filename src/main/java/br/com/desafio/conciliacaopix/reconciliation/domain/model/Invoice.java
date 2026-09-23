@@ -31,7 +31,7 @@ public class Invoice {
     }
 
     public boolean isOpen() {
-        return this.status.equals(InvoiceStatus.ABERTA);
+        return this.status == InvoiceStatus.ABERTA;
     }
 
     public void markAsExpired(Instant reference) {
@@ -41,6 +41,9 @@ public class Invoice {
     }
 
     public void markAsPaid() {
+        if (!this.isOpen()) {
+            throw new IllegalStateException("Fatura não está aberta e não pode ser paga.");
+        }
         this.status = InvoiceStatus.PAGA;
     }
 

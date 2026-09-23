@@ -17,12 +17,14 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 @Document(collection = "invoices")
-@CompoundIndex(name = "idx_fallback_lookup", def = "{'pixKey': 1, 'amount': 1, 'createdAt' : 1}")
+@CompoundIndex(name = "idx_fallback_lookup", def = "{'pixKey': 1, 'transactionAmount': 1, 'createdAt' : 1}")
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
 public class InvoiceDocument {
+
+    public static final String STATUS_FIELD_NAME = "status";
 
     @Id
     private String id;
