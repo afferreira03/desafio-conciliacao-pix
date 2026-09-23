@@ -88,6 +88,24 @@ executado com minha autorização comando a comando e commitado separadamente.
 - O experimento serviu para uma conclusão: rodadas idênticas variaram de 215 a 287 conciliações/s neste notebook,
   então ganhos de 10–20 % não são mensuráveis de forma confiável nesse ambiente — registrado no README.
 
+### Noite de 23/09 — container, análise de aderência e melhorias finais
+
+| Momento | Uso da IA | Minha participação / decisão |
+|---|---|---|
+| Dockerfile | **Implementado pela IA a meu pedido**: build multi-stage, camadas do Spring Boot, usuário não-root; serviço `app` no compose (profile), `directConnection` no Mongo, healthcheck via `bash` (a imagem JRE não tem `curl`) | Pedido de rodar o teste de carga com a aplicação em container |
+| Container × host | Experimento com 4 rodadas alternadas: ~1,6× mais vazão com a aplicação no container; operações simples no Mongo ~2,8× mais rápidas; o commit não muda | Escolhi a comparação controlada na mesma sessão |
+| Análise de aderência | Pesquisa na internet (vagas sênior do Itaú, relatos de entrevista, notícias da migração para AWS) comparada ao enunciado: pontos atendidos, lacunas e riscos | Pedido da análise; escolha das melhorias a fazer |
+| Melhorias de documentação | Mapeamento da arquitetura para serviços AWS; desenho do controle de acesso (escopos, identidades de serviço, classificação LGPD); 17 regras de alerta validadas com `promtool` contra métricas conferidas na aplicação; notas de complexidade | Aprovação de cada item |
+| Melhorias de código (plano aprovado por mim antes da implementação) | Gauge da idade do outbox pendente; correlação de logs por MDC (`RecordInterceptor`); teste de integração com concorrência real no compare-and-set; pipeline de CI | Decidi retomar o MDC, que eu tinha cortado por prazo; aprovação de cada verificação e commit |
+
+**Pontos em que a IA se corrigiu nesta etapa:**
+- Na análise de aderência, a IA disse que a busca de fatura por `txId` era O(1); ao escrever as notas de
+  complexidade, corrigiu para O(log n) (índices do MongoDB são árvores B).
+- O primeiro padrão de log do MDC colocava um prefixo vazio `[e2e= ]` em toda linha sem mensagem em processamento; a
+  IA mediu (37 ocorrências no log do teste), corrigiu com `%replace` e verificou de novo (0 ocorrências).
+- Antes de afirmar que o teste de concorrência exercita uma disputa real, a IA acrescentou uma medição sem asserção:
+  5 tentativas com falha reprocessadas por execução — a disputa acontece de fato.
+
 ## 5. Documentação
 
 | Momento | Uso da IA | Decisão / trabalho próprio |
@@ -100,8 +118,8 @@ executado com minha autorização comando a comando e commitado separadamente.
 ## O que a IA **não** fez / limites do uso
 
 - A IA não decidiu escopo nem trade-offs sozinha: as decisões registradas no plano do projeto (sem Resilience4j,
-  sem GraalVM/Keycloak/Grafana, Mongo local sem autenticação, corte do MDC) foram minhas, com a IA apresentando
-  alternativas.
+  sem GraalVM/Keycloak/Grafana, Mongo local sem autenticação, corte do MDC por prazo e sua retomada na última noite)
+  foram minhas, com a IA apresentando alternativas.
 - Nenhum comando foi executado sem autorização, e nenhum commit foi feito sem meu aval.
 - Toda sugestão foi validada: testes executados localmente, testes de integração com Testcontainers e verificação
   manual no ambiente Docker.

@@ -570,6 +570,7 @@ consultou o quê, quando), guardada fora do alcance da aplicação.
 | `pix.reconciliation.total` | contador | `status`, `reason` | volume por resultado; taxa de `INCONSISTENTE` |
 | `pix.reconciliation.latency` | timer (histograma + SLO de 2 s) | — | NFR de latência: `paymentTimestamp` → conciliação persistida |
 | `pix.reconciliation.duplicates` | contador | — | reentregas absorvidas pela idempotência |
+| `pix.outbox.oldest.pending.age` | gauge (segundos) | — | idade do evento `PENDING` mais antigo do outbox; calculada a cada scrape, independente do relay (cresce também se o relay parar) |
 
   Registrada **após** o commit da transação — só conta o que foi efetivamente persistido; duplicatas não entram no
   contador por status nem no timer.
@@ -583,13 +584,19 @@ consultou o quê, quando), guardada fora do alcance da aplicação.
 | NFR de latência | < 99 % das conciliações em 2 s (crítico); p99 > 2 s; mensagens chegando sem nenhuma conciliação persistida | `pix_reconciliation_latency_seconds_bucket{le="2.0"}`, `pix_reconciliation_total`, `spring_kafka_listener_seconds` |
 | Falhas e DLT | > 1 % de falhas no listener; **qualquer mensagem enviada ao DLT** (crítico); falha ao publicar no DLT | `spring_kafka_listener_seconds{result}`, `spring_kafka_template_seconds{name="dlt…"}` |
 | Negócio | `INCONSISTENTE` > 5 %; `PENDENTE` > 10 %; reentregas > 5 % | `pix_reconciliation_total{status}`, `pix_reconciliation_duplicates_total` |
-| Plataforma | Relay do outbox falhando ou parado; commit do Mongo > 50 ms; pool do Mongo esgotado; 5xx na API; instância fora | `spring_kafka_template_seconds{name="outboxKafkaTemplate"}`, `tasks_scheduled_execution_seconds`, `mongodb_driver_*`, `http_server_requests_seconds`, `up` |
-| Requer fonte externa | Lag do consumer > 4.000 mensagens (≈ 2 s de fila a 2.000 TPS); evento `PENDING` com mais de 1 min | kafka-exporter ou `MaxOffsetLag` do MSK; gauge a criar no relay |
+| Plataforma | Relay do outbox falhando ou parado; evento `PENDING` com mais de 1 min; commit do Mongo > 50 ms; pool do Mongo esgotado; 5xx na API; instância fora | `spring_kafka_template_seconds{name="outboxKafkaTemplate"}`, `tasks_scheduled_execution_seconds`, `pix_outbox_oldest_pending_age_seconds`, `mongodb_driver_*`, `http_server_requests_seconds`, `up` |
+| Requer fonte externa | Lag do consumer > 4.000 mensagens (≈ 2 s de fila a 2.000 TPS) | kafka-exporter ou `MaxOffsetLag` do MSK |
 
   O envio ao DLT é observável pela própria aplicação: toda mensagem desviada passa pelos templates `dltBytesTemplate`
   / `dltJsonTemplate`, instrumentados pelo spring-kafka. Os limiares são pontos de partida, a calibrar com o tráfego
   real.
-- Stack Grafana/OpenTelemetry e correlação de logs (MDC com `endToEndId`) não implementadas — ver trade-offs.
+- **Correlação de logs (MDC)**: um `RecordInterceptor` do spring-kafka (`MdcRecordInterceptor`) coloca no MDC o
+  `endToEndId`, o `txId` e a posição no tópico da mensagem em processamento; toda linha de log desse processamento
+  (consumer, serviço, retry, envio ao DLT) sai com o prefixo `[e2e=E… pix.transactions-3@42]`. As chaves são limpas
+  em `clearThreadState`, não em `success/failure`, porque o spring-kafka chama esses métodos antes do error handler e o
+  log de "retentativas esgotadas" precisa manter a correlação. Só identificadores técnicos entram no MDC — nunca a
+  chave Pix.
+- Stack Grafana/OpenTelemetry (dashboards e tracing distribuído) não implementada — ver trade-offs.
 
 ---
 
@@ -602,11 +609,20 @@ consultou o quê, quando), guardada fora do alcance da aplicação.
 | Adapters | Unitário com mocks | Compare-and-set da fatura, relay do outbox (sucesso, falha parcial, timeout, drenagem em lotes), métricas, mapeamentos |
 | Web | MockMvc standalone | Status HTTP, validação, ProblemDetail, mascaramento |
 | Arquitetura | Spring Modulith + ArchUnit | Fronteiras de módulo; domínio sem framework; aplicação sem infraestrutura |
-| Integração | **Testcontainers** (MongoDB replica set + Redpanda) | Fluxo ponta a ponta até o tópico de resultado; idempotência; DLT; rollback real do compare-and-set |
+| Integração | **Testcontainers** (MongoDB replica set + Redpanda) | Fluxo ponta a ponta até o tópico de resultado; idempotência; DLT; rollback real do compare-and-set; **concorrência real**: 6 pagamentos simultâneos da mesma fatura em 6 partições → exatamente 1 `CONCILIADO` e 5 `INVOICE_ALREADY_PAID` |
 | Carga | Gerador de burst / ritmo constante | Vazão, latência, contagens esperado × obtido |
 
-Execução: `mvn test` → 102 testes unitários e de arquitetura (não requer Docker). `mvn verify` → + 4 testes de
+Execução: `mvn test` → 109 testes unitários e de arquitetura (não requer Docker). `mvn verify` → + 5 testes de
 integração (`*IT`, via failsafe; requer Docker).
+
+O teste de concorrência não depende de sorte na intercalação: qualquer ordem leva ao mesmo resultado, e se um
+perdedor esgotasse as retentativas ele iria ao DLT sem registro e a contagem falharia. Para mostrar que a disputa
+realmente acontece, o teste registra no log quantas tentativas falharam e foram reprocessadas (nas execuções
+locais: 5 — um conflito por perdedor).
+
+**Integração contínua** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): a cada push em `main` e em pull
+requests, `mvn verify` (unitários, arquitetura e Testcontainers) e o build da imagem Docker; relatórios de teste
+anexados quando algo falha. Workflow validado com `actionlint`.
 
 ---
 
@@ -641,7 +657,7 @@ Cada decisão com o que se ganha, o que se paga e para onde ela evolui num cená
 |---|---|---|---|
 | **Métricas via porta** (Micrometer + Prometheus) | Evidência dos NFRs (latência, status, duplicatas) sem acoplar a aplicação | Sem dashboards nem tracing | OpenTelemetry → backend gerenciado de métricas/traces/logs; alertas da seção 10 |
 | **Sem Grafana/OpenTelemetry** | Prazo; Actuator já expõe as métricas | Sem visão distribuída de uma transação | Tracing ponta a ponta com propagação de contexto via headers Kafka |
-| **Sem correlação de logs (MDC)** | Prazo | Rastrear um Pix nos logs exige busca por `endToEndId` | MDC com `endToEndId` no consumer e no relay; logs estruturados (JSON) para o agregador da nuvem |
+| **Correlação de logs por MDC** (`RecordInterceptor`) | Todas as linhas do processamento de um Pix saem com `endToEndId` e posição no tópico, sem mudar o código de negócio | Correlação só dentro do processo; logs em texto | Logs estruturados (JSON, `logging.structured.format`) para o agregador da nuvem; tracing com propagação via headers Kafka |
 | **Sem Keycloak / controle de acesso** | Prazo | API de relatórios aberta | OIDC com o provedor de identidade da nuvem (ou Keycloak); papéis de leitura; mTLS/SASL entre serviços e broker |
 | **Mongo local sem autenticação** | Replica set + auth exige `--keyFile`; simplifica o dev | Inseguro fora do ambiente local | Autenticação, TLS, criptografia em repouso e segredos em cofre (ex.: AWS Secrets Manager / Vault) |
 | **Dockerfile multi-stage + JRE** (camadas do Spring Boot, não-root) | Build reproduzível sem Java no host; rebuild rápido (só a camada da aplicação muda); roda na mesma rede da infraestrutura | Imagem de ~600 MB (JRE Ubuntu); healthcheck improvisado com `bash` por falta de `curl` | Base distroless/Alpine menor; imagem publicada em registry com scan; o mesmo artefato em EKS com probes do Actuator |
@@ -731,7 +747,7 @@ Cada fase só começa quando a métrica da fase anterior indicar necessidade —
 | Fase | Objetivo | O que muda | Gatilho para a próxima fase |
 |---|---|---|---|
 | **0 — Hoje** | Provar corretude e medir | Monólito modular, 1 instância, Docker Compose | — |
-| **1 — Pronto para nuvem** | Rodar em produção sem mudar a arquitetura | Imagem publicada em registry (o `Dockerfile` já existe) com scan de vulnerabilidades; segredos em cofre; autenticação/TLS no Mongo e no Kafka; OIDC na API; fábricas Kafka via `ConnectionDetails`; graceful shutdown; logs JSON + MDC; Swagger desligado | Primeiro deploy estável com alertas da seção 10 |
+| **1 — Pronto para nuvem** | Rodar em produção sem mudar a arquitetura | Imagem publicada em registry (o `Dockerfile` já existe) com scan de vulnerabilidades; segredos em cofre; autenticação/TLS no Mongo e no Kafka; OIDC na API; fábricas Kafka via `ConnectionDetails`; graceful shutdown; logs JSON (o MDC já existe); Swagger desligado | Primeiro deploy estável com alertas da seção 10 |
 | **2 — Serviços gerenciados + escala de consumers** | Absorver o pico com mais réplicas | Kubernetes multi-AZ; Kafka e MongoDB gerenciados; partições dimensionadas para o pico; workers com autoscaling por lag; relay com uma instância ativa | CPU/latência do MongoDB saturando antes do pico (como no teste de carga) |
 | **3 — Tirar o gargalo do banco** | Menos round-trips por Pix | Listener em lote + `bulkWrite`; relay em lote ou CDC; `insert` no lugar de `save()`; idempotência sem leitura prévia (seção 8) | Um replica set não atende mesmo com lotes |
 | **4 — Escala horizontal do dado** | Throughput de escrita além de um nó | Sharding do MongoDB; separação worker × API; relatórios em réplicas secundárias ou visão pré-agregada | Necessidade de escalar/entregar módulos de forma independente |
@@ -756,7 +772,7 @@ consumers sem a fase 3 só move o gargalo para o MongoDB, como mostrou o teste 1
 - As fábricas Kafka customizadas (consumer, DLT, outbox) são montadas a partir de `KafkaProperties` e **não usam os
   `ConnectionDetails` do Spring Boot** — nos testes de integração o broker é injetado por
   `spring.kafka.bootstrap-servers`; evolução: construir as fábricas a partir de `KafkaConnectionDetails`.
-- Sem correlação de logs por `endToEndId` (MDC).
+- Correlação de logs só dentro do processo (MDC); sem tracing distribuído nem logs estruturados em JSON.
 
 ---
 

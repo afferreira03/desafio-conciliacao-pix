@@ -127,7 +127,7 @@ Mostrar também: `Api '/reconciliations/summary'` (os números do lote aparecem 
 ## 7. Testes — 3 min
 
 ```powershell
-mvn test        # ~1 min: 102 testes unitários e de arquitetura, sem Docker
+mvn test        # ~1 min: 109 testes unitários e de arquitetura, sem Docker
 ```
 
 `mvn verify` (integração com Testcontainers) leva ~2–3 min: rodar antes e mostrar o resultado, ou deixar rodando
