@@ -88,7 +88,16 @@ class InvoiceControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("TX-123!", "-10.00", future())))
                 .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(PROBLEM_JSON));
+                .andExpect(content().contentTypeCompatibleWith(PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Requisição inválida"))
+                .andExpect(jsonPath("$.detail").value("2 campos inválidos."))
+                .andExpect(jsonPath("$.errors.length()").value(2))
+                .andExpect(jsonPath("$.errors[0].field").value("amount"))
+                .andExpect(jsonPath("$.errors[0].message").isNotEmpty())
+                .andExpect(jsonPath("$.errors[1].field").value("txId"))
+                .andExpect(jsonPath("$.errors[1].message").value("deve ter de 1 a 35 caracteres alfanuméricos"))
+                // o valor rejeitado não é devolvido (pode conter dado pessoal)
+                .andExpect(jsonPath("$.errors[0].rejectedValue").doesNotExist());
 
         verifyNoInteractions(useCase);
     }
@@ -99,7 +108,9 @@ class InvoiceControllerTest {
         mockMvc.perform(post("/api/v1/invoices")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("TX123", "150.00", Instant.now().minus(1, ChronoUnit.DAYS).toString())))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value("1 campo inválido."))
+                .andExpect(jsonPath("$.errors[0].field").value("expiresAt"));
 
         verifyNoInteractions(useCase);
     }

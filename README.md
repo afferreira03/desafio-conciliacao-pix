@@ -233,7 +233,21 @@ DLT e a latência (p50/p95/p99 e % dentro do SLO de 2 s). O resultado está na [
 
 ## 5. API REST
 
-Documentação interativa em `/swagger-ui.html`. Erros no formato **ProblemDetail (RFC 9457)**.
+Documentação interativa em `/swagger-ui.html`. Erros no formato **ProblemDetail (RFC 9457)**; erros de validação
+(corpo ou query params) trazem a lista de violações — sem ecoar o valor rejeitado, que pode conter dado pessoal:
+
+```json
+{
+  "title": "Requisição inválida",
+  "status": 400,
+  "detail": "2 campos inválidos.",
+  "instance": "/api/v1/invoices",
+  "errors": [
+    { "field": "amount", "message": "deve ser maior que 0" },
+    { "field": "txId", "message": "deve ter de 1 a 35 caracteres alfanuméricos" }
+  ]
+}
+```
 
 | Método | Endpoint | Descrição |
 |---|---|---|

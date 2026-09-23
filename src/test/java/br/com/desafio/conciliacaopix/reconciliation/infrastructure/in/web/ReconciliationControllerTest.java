@@ -124,7 +124,11 @@ class ReconciliationControllerTest {
     void shouldReturn400WhenPageSizeTooLarge() throws Exception {
         mockMvc.perform(get("/api/v1/reconciliations").param("size", "500"))
                 .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(PROBLEM_JSON));
+                .andExpect(content().contentTypeCompatibleWith(PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Requisição inválida"))
+                .andExpect(jsonPath("$.errors.length()").value(1))
+                .andExpect(jsonPath("$.errors[0].field").value("size"))
+                .andExpect(jsonPath("$.errors[0].message").isNotEmpty());
 
         verifyNoInteractions(useCase);
     }
