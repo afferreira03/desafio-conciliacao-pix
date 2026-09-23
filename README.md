@@ -166,6 +166,27 @@ O diagrama de módulos gerado a partir do código pelo Spring Modulith (PlantUML
 | Valor divergente | `INCONSISTENTE` | `AMOUNT_MISMATCH` | — |
 | Aberta e valor confere | `CONCILIADO` | — | `ABERTA → PAGA` |
 
+### Complexidade e estruturas de dados
+
+Os índices do MongoDB são árvores B: toda busca por chave custa **O(log n)** no tamanho da coleção, e o custo real
+é dominado pelo round-trip ao banco (seção 8), não pela busca em si.
+
+| Operação | Estrutura / índice | Custo |
+|---|---|---|
+| Idempotência (`findByEndToEndId`) | Índice único `endToEndId` | O(log n) |
+| Fatura por `txId` | Índice único `txId` | O(log n) |
+| Fallback (chave Pix + valor + janela de ±30 min) | Índice composto `{pixKey, amount, status, createdAt}` — ordem ESR: igualdades primeiro, intervalo de data por último | O(log n + k), com k = candidatas na janela (tipicamente 0 ou 1) |
+| Regras do motor | Sequência fixa de verificações sobre uma fatura | O(1) |
+| Compare-and-set da fatura | Update por `_id` + `status = ABERTA` | O(log n) |
+| Listagem paginada | Índices `{status, createdAt}`, `{status, inconsistencyReason, createdAt}`, `{createdAt}` + `skip/limit` | O(log n + skip + size) — páginas profundas ficam caras; evolução: paginação por cursor (`createdAt`, `_id`) |
+| Relatório (`/summary`) | `$match` por período (índice em `createdAt`) + `$group` por status/motivo | O(m), m = conciliações no período; evolução: contadores pré-agregados atualizados na mesma transação |
+| Relay do outbox | Índice **parcial** `{status, createdAt}` só com `PENDING` | Cresce com o backlog pendente, não com o histórico |
+| Roteamento no Kafka | Partição = hash(`txId`) | O(1); ordem garantida por fatura |
+
+Valores monetários usam `BigDecimal` (escala 2, `HALF_EVEN`) na aplicação e `Decimal128` no banco — aritmética
+decimal exata, sem `double`. Os eventos de domínio são uma hierarquia selada (`sealed interface`), e o mapeamento
+para o outbox usa `switch` com pattern matching exaustivo: um evento novo não compila sem ser tratado.
+
 ---
 
 ## 4. Como executar
@@ -479,13 +500,62 @@ para o NFR de vazão, validada em ambiente dimensionado; 5–7 fazem parte do de
   transação), nunca a chave Pix; o log por mensagem fica em `DEBUG`. Ponto de atenção: ao esgotar as retentativas, o
   `DefaultErrorHandler` do spring-kafka loga o `ConsumerRecord` com o payload (que contém a chave Pix) — em produção,
   customizar esse log para registrar só tópico/partição/offset/chave.
-- **Sem autenticação na API nesta versão** — trade-off consciente (ver seção 12). Proposta: OAuth2/OIDC (ex.: Keycloak)
-  para a API de relatórios com papéis de leitura; mTLS/SASL entre serviços e broker.
+- **Sem autenticação na API nesta versão** — trade-off consciente (ver seção 12). O desenho do controle de acesso
+  está abaixo.
 - **MongoDB local sem `--auth`/`--keyFile`** para simplificar o ambiente de desenvolvimento; em produção: autenticação,
   TLS e criptografia em repouso.
 - **Evoluções**: criptografia de campo para a chave Pix na fatura (Queryable Encryption / CSFLE do MongoDB, que ainda
   permite o fallback por igualdade); política de retenção (ex.: índice TTL para registros de conciliação e outbox
   após o prazo regulatório); Swagger UI desabilitado em produção.
+
+### Controle de acesso (desenho)
+
+Não implementado nesta versão; é o desenho que a fase 1 da seção 13 implementa. Princípios: **autenticação
+centralizada** (provedor de identidade corporativo via OIDC), **autorização por escopo** em cada endpoint e **menor
+privilégio** para pessoas e serviços.
+
+**Pessoas e sistemas × API**
+
+| Recurso | Escopo exigido | Quem acessa | Como autentica |
+|---|---|---|---|
+| `GET /api/v1/reconciliations/{endToEndId}`, `GET /api/v1/reconciliations` | `reconciliation:read` | Operação/backoffice de conciliação, auditoria | OIDC (authorization code + MFA no provedor) |
+| `GET /api/v1/reconciliations/summary` | `reconciliation:report` | Gestão financeira, operação | OIDC |
+| `POST /api/v1/invoices` | `invoice:write` | Sistema de faturamento (máquina a máquina) | OAuth2 client credentials |
+| `GET /api/v1/invoices/{txId}` | `invoice:read` | Operação, sistema de faturamento | OIDC / client credentials |
+| `/actuator/health` (liveness/readiness) | — | Probes do orquestrador | Só rede interna; resposta sem dados |
+| `/actuator/prometheus`, `/actuator/metrics` | — | Coletor de métricas | Só rede interna (porta/rota não exposta ao gateway) |
+| Swagger UI / OpenAPI | — | — | Desabilitado em produção |
+
+Implementação prevista: Spring Security como **OAuth2 Resource Server** validando o JWT do provedor, com
+`@PreAuthorize("hasAuthority('SCOPE_reconciliation:read')")` nos controllers — só no adapter web; domínio e aplicação
+não mudam. Tokens de curta duração; o gateway (seção 13) também valida o token e aplica rate limiting. A chave Pix
+**nunca** sai sem máscara pela API; se um dia houver necessidade de ver o valor completo, será um escopo separado
+com registro de auditoria de cada acesso.
+
+**Identidades de serviço (menor privilégio)**
+
+| Identidade | Kafka (ACL por tópico) | MongoDB (papel mínimo) |
+|---|---|---|
+| Worker (consumer) | `READ` em `pix.transactions` (grupo `pix-reconciliation-group`); `WRITE` em `pix.transactions.DLT` | Ler e gravar em `reconciliations` (verificação de idempotência + registro) e `outbox_events`; ler e atualizar `invoices` |
+| Relay do outbox | `WRITE` em `pix.reconciliation.result` | Ler e atualizar `outbox_events` |
+| API | — | Ler `reconciliations`; ler e inserir `invoices` |
+
+Hoje os três papéis rodam no mesmo processo (uma identidade com a união das permissões); separar os deployments
+(seção 13) permite uma identidade por papel. Transporte com TLS em tudo; autenticação no broker por IAM (MSK) ou
+SASL/SCRAM; no MongoDB, usuários SCRAM/x.509 por papel; credenciais em cofre de segredos, nunca na imagem nem no
+repositório.
+
+**Classificação dos dados (LGPD)**
+
+| Dado | Classificação | Onde fica | Tratamento |
+|---|---|---|---|
+| Chave Pix (pode ser CPF, e-mail, telefone ou aleatória) | **Dado pessoal** | Só na fatura (necessária para o fallback); **não** no registro de conciliação | Mascarada na API; fora dos logs da aplicação; criptografia de campo como evolução |
+| `endToEndId`, `txId` | Identificador transacional | Conciliação, fatura, eventos, logs | Chave de negócio; pode aparecer em logs |
+| Valores e datas | Dado financeiro | Conciliação, fatura, eventos | Acesso por escopo; retenção pelo prazo regulatório |
+
+A base legal e o prazo de retenção devem ser definidos com o jurídico/DPO; a minimização (conciliação sem chave Pix)
+reduz o impacto de pedidos de titulares e de incidentes. Acessos à API devem gerar trilha de auditoria (quem
+consultou o quê, quando), guardada fora do alcance da aplicação.
 
 ---
 
@@ -504,9 +574,21 @@ para o NFR de vazão, validada em ambiente dimensionado; 5–7 fazem parte do de
   Registrada **após** o commit da transação — só conta o que foi efetivamente persistido; duplicatas não entram no
   contador por status nem no timer.
 
-- **Indicadores e alertas propostos**: latência p99 > 2 s (ou `le="2.0"` / total < 99 %); lag do consumer group
-  crescendo; qualquer mensagem no DLT; idade do evento `PENDING` mais antigo no outbox; taxa de `INCONSISTENTE` fora
-  do padrão; health do Mongo/Kafka.
+- **Alertas como código**: [`docs/alerts/prometheus-rules.yml`](docs/alerts/prometheus-rules.yml) — 17 regras no
+  formato do Prometheus (sintaxe validada com `promtool check rules`; todas as métricas dos grupos 1–4 conferidas no
+  `/actuator/prometheus` da aplicação):
+
+| Grupo | Alertas | Métrica de origem |
+|---|---|---|
+| NFR de latência | < 99 % das conciliações em 2 s (crítico); p99 > 2 s; mensagens chegando sem nenhuma conciliação persistida | `pix_reconciliation_latency_seconds_bucket{le="2.0"}`, `pix_reconciliation_total`, `spring_kafka_listener_seconds` |
+| Falhas e DLT | > 1 % de falhas no listener; **qualquer mensagem enviada ao DLT** (crítico); falha ao publicar no DLT | `spring_kafka_listener_seconds{result}`, `spring_kafka_template_seconds{name="dlt…"}` |
+| Negócio | `INCONSISTENTE` > 5 %; `PENDENTE` > 10 %; reentregas > 5 % | `pix_reconciliation_total{status}`, `pix_reconciliation_duplicates_total` |
+| Plataforma | Relay do outbox falhando ou parado; commit do Mongo > 50 ms; pool do Mongo esgotado; 5xx na API; instância fora | `spring_kafka_template_seconds{name="outboxKafkaTemplate"}`, `tasks_scheduled_execution_seconds`, `mongodb_driver_*`, `http_server_requests_seconds`, `up` |
+| Requer fonte externa | Lag do consumer > 4.000 mensagens (≈ 2 s de fila a 2.000 TPS); evento `PENDING` com mais de 1 min | kafka-exporter ou `MaxOffsetLag` do MSK; gauge a criar no relay |
+
+  O envio ao DLT é observável pela própria aplicação: toda mensagem desviada passa pelos templates `dltBytesTemplate`
+  / `dltJsonTemplate`, instrumentados pelo spring-kafka. Os limiares são pontos de partida, a calibrar com o tráfego
+  real.
 - Stack Grafana/OpenTelemetry e correlação de logs (MDC com `endToEndId`) não implementadas — ver trade-offs.
 
 ---
@@ -616,6 +698,21 @@ flowchart LR
 
 O mesmo artefato roda em **três papéis** (worker, relay, API), ativados por perfil/configuração, cada um escalando
 pelo seu próprio sinal.
+
+### Mapeamento para a AWS
+
+| Componente | Serviço AWS | Observações |
+|---|---|---|
+| Worker, relay e API | **Amazon EKS** (node groups em 3 AZs) | Imagem do `Dockerfile` publicada no **Amazon ECR** com scan de vulnerabilidades; probes do Actuator como liveness/readiness |
+| Kafka | **Amazon MSK** | Autenticação por IAM e TLS; partições dimensionadas para o pico; ACLs por tópico conforme a seção 9. O código não muda (API Kafka) |
+| MongoDB | **MongoDB Atlas na AWS** via PrivateLink | Transações multi-documento, change streams e sharding nativos; backup contínuo; criptografia com chave do KMS. Alternativa: **Amazon DocumentDB** — compatível com a API, mas é preciso validar antes o suporte a transações multi-documento, change streams e operadores usados; a decisão sai de teste, não de suposição |
+| Autoscaling | **KEDA** (lag do consumer do MSK) para workers; HPA por CPU/RPS para a API | Máximo de réplicas de workers = nº de partições |
+| Entrada da API | **Application Load Balancer + AWS WAF** (ou Amazon API Gateway) | Validação do token OIDC e rate limiting na borda |
+| Identidade dos pods | **IAM Roles for Service Accounts (IRSA)** | Uma role por papel (worker, relay, API): sem credencial estática |
+| Segredos e chaves | **AWS Secrets Manager** (via External Secrets Operator) + **AWS KMS** | Credenciais do Mongo e segredos fora da imagem; KMS para MSK, volumes e Atlas |
+| Métricas e alertas | **Amazon Managed Service for Prometheus** (ou Datadog/CloudWatch via coletor OpenTelemetry) | O Managed Prometheus aceita o mesmo formato de [`docs/alerts/prometheus-rules.yml`](docs/alerts/prometheus-rules.yml); o lag do consumer vem da métrica `MaxOffsetLag` do MSK |
+| Infraestrutura como código | **Terraform** | Rede, MSK, EKS, IAM e Atlas (provider oficial) versionados e revisados como código |
+| Região | `sa-east-1` (São Paulo), multi-AZ | Recuperação de desastre em segunda região na fase 5 |
 
 ### Como cada camada escala
 

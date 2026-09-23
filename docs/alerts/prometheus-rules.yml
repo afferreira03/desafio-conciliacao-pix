@@ -1,0 +1,207 @@
+# Regras de alerta (Prometheus) para a conciliação Pix.
+#
+# Todas as métricas dos grupos 1 a 4 foram conferidas no /actuator/prometheus da aplicação (Micrometer).
+# O grupo 5 depende de fontes que a aplicação ainda NÃO exporta (exporter Kafka / métrica nova) — ver comentários.
+# Validação de sintaxe: promtool check rules docs/alerts/prometheus-rules.yml
+#
+# Limiares são pontos de partida: calibrar com o comportamento real em produção.
+
+groups:
+
+  # 1. NFR de latência (≤ 2 s) e fluxo de conciliação
+  - name: pix-reconciliation-slo
+    rules:
+      - alert: PixLatenciaSloViolado
+        # Fração das conciliações concluídas em até 2 s (bucket le="2.0" do timer com SLO).
+        expr: |
+          (
+            sum(rate(pix_reconciliation_latency_seconds_bucket{le="2.0"}[5m]))
+            /
+            sum(rate(pix_reconciliation_latency_seconds_count[5m]))
+          ) < 0.99
+          and sum(rate(pix_reconciliation_latency_seconds_count[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Menos de 99% das conciliações em até 2 s"
+          description: "{{ $value | humanizePercentage }} das conciliações dos últimos 5 min ficaram dentro de 2 s (NFR: 2 s)."
+
+      - alert: PixLatenciaP99Alta
+        expr: histogram_quantile(0.99, sum by (le) (rate(pix_reconciliation_latency_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 da latência de conciliação acima de 2 s"
+          description: "p99 = {{ $value | humanizeDuration }}. Verificar lag do consumer e latência do MongoDB."
+
+      - alert: PixConsumoParado
+        # Há processamento no listener, mas nenhuma conciliação persistida: tudo falhando.
+        expr: |
+          sum(rate(spring_kafka_listener_seconds_count[5m])) > 0
+          and sum(rate(pix_reconciliation_total[5m])) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mensagens chegam, mas nenhuma conciliação é persistida"
+          description: "O listener está ativo e nenhuma conciliação foi gravada em 5 min. Verificar erros do consumer e o MongoDB."
+
+  # 2. Falhas de processamento e DLT
+  - name: pix-reconciliation-failures
+    rules:
+      - alert: PixFalhasNoListener
+        # Inclui tentativas que ainda serão reprocessadas pelo retry (erro transitório).
+        expr: |
+          sum(rate(spring_kafka_listener_seconds_count{result="failure"}[5m]))
+          /
+          sum(rate(spring_kafka_listener_seconds_count[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mais de 1% das execuções do listener falhando"
+          description: "Taxa de falha {{ $value | humanizePercentage }}. Falhas persistentes terminam no DLT."
+
+      - alert: PixMensagemEnviadaAoDlt
+        # Toda mensagem desviada ao DLT passa pelos templates de DLT (bytes = erro de desserialização).
+        expr: sum(increase(spring_kafka_template_seconds_count{name=~"dltBytesTemplate|dltJsonTemplate",result="success"}[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Transação Pix enviada ao dead-letter topic"
+          description: "{{ $value }} mensagem(ns) no pix.transactions.DLT nos últimos 10 min — transação não conciliada, exige análise."
+
+      - alert: PixFalhaAoPublicarNoDlt
+        # Se o próprio envio ao DLT falha, a mensagem fica sendo reprocessada (risco de travar a partição).
+        expr: sum(increase(spring_kafka_template_seconds_count{name=~"dltBytesTemplate|dltJsonTemplate",result="failure"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Falha ao publicar no dead-letter topic"
+          description: "O recoverer não conseguiu enviar ao DLT; a partição pode ficar bloqueada."
+
+  # 3. Qualidade da conciliação (sinais de negócio)
+  - name: pix-reconciliation-business
+    rules:
+      - alert: PixTaxaDeInconsistenciaAnormal
+        expr: |
+          sum(rate(pix_reconciliation_total{status="INCONSISTENTE"}[15m]))
+          /
+          sum(rate(pix_reconciliation_total[15m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mais de 5% das conciliações inconsistentes"
+          description: "Taxa de INCONSISTENTE {{ $value | humanizePercentage }}. Ver o motivo predominante no relatório (/summary)."
+
+      - alert: PixTaxaDePendentesAlta
+        expr: |
+          sum(rate(pix_reconciliation_total{status="PENDENTE"}[15m]))
+          /
+          sum(rate(pix_reconciliation_total[15m])) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mais de 10% dos Pix sem fatura correspondente"
+          description: "Pode indicar atraso no cadastro de faturas ou txId incorreto na origem."
+
+      - alert: PixReentregasFrequentes
+        # Reentregas absorvidas pela idempotência: picos indicam rebalanceamentos/reprocessamento em massa.
+        expr: |
+          sum(rate(pix_reconciliation_duplicates_total[15m]))
+          /
+          sum(rate(pix_reconciliation_total[15m])) > 0.05
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Reentregas acima de 5% do volume"
+          description: "Verificar rebalanceamentos do consumer group e reinícios da aplicação."
+
+  # 4. Outbox, MongoDB, API e instância
+  - name: pix-reconciliation-platform
+    rules:
+      - alert: OutboxFalhaAoPublicarResultado
+        expr: sum(increase(spring_kafka_template_seconds_count{name="outboxKafkaTemplate",result="failure"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Relay do outbox não consegue publicar em pix.reconciliation.result"
+          description: "Eventos permanecem PENDING (não se perdem), mas os consumidores do resultado ficam atrasados."
+
+      - alert: OutboxRelayParado
+        expr: sum(rate(tasks_scheduled_execution_seconds_count{code_function="poll",code_namespace=~".*OutboxEventPoller"}[5m])) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Relay do outbox não está executando"
+          description: "Nenhuma execução do poll em 5 min: resultados não estão sendo publicados."
+
+      - alert: MongoCommitLento
+        expr: |
+          sum(rate(mongodb_driver_commands_seconds_sum{command="commitTransaction"}[5m]))
+          /
+          sum(rate(mongodb_driver_commands_seconds_count{command="commitTransaction"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "commitTransaction médio acima de 50 ms"
+          description: "Commit médio {{ $value | humanizeDuration }} (referência medida: ~7 ms). Principal custo por Pix."
+
+      - alert: MongoPoolEsgotado
+        expr: max(mongodb_driver_pool_waitqueuesize) > 0 or sum(increase(mongodb_driver_pool_checkoutfailed_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Conexões do MongoDB esgotadas"
+          description: "Há threads esperando conexão (ou falhando ao obter): revisar pool e concorrência."
+
+      - alert: ApiErros5xx
+        expr: |
+          sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+          /
+          sum(rate(http_server_requests_seconds_count[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mais de 1% de erros 5xx na API"
+
+      - alert: InstanciaIndisponivel
+        expr: up{job="conciliacao-pix"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instância da conciliação sem responder ao scrape"
+
+  # 5. Requer fonte externa ou métrica nova (NÃO exportado pela aplicação hoje)
+  - name: pix-reconciliation-external
+    rules:
+      - alert: PixLagDoConsumerAlto
+        # Fonte: kafka-exporter (kafka_consumergroup_lag) ou, no MSK, a métrica MaxOffsetLag no CloudWatch.
+        # Limiar derivado do NFR: a 2.000 TPS, 4.000 mensagens de lag ≈ 2 s de atraso só de fila.
+        expr: sum(kafka_consumergroup_lag{consumergroup="pix-reconciliation-group"}) > 4000
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lag do consumer acima de ~2 s de fila na vazão média"
+          description: "Lag = {{ $value }} mensagens. Escalar consumers (até o nº de partições) ou investigar o MongoDB."
+
+      - alert: OutboxEventoPendenteAntigo
+        # Fonte: gauge a ser criado (idade do evento PENDING mais antigo) — evolução documentada no README.
+        expr: pix_outbox_oldest_pending_age_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Evento de resultado pendente há mais de 1 min no outbox"
