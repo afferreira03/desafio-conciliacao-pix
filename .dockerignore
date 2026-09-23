@@ -1,0 +1,4 @@
+# Só pom.xml e src/ entram no build da imagem.
+*
+!pom.xml
+!src/

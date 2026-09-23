@@ -60,6 +60,36 @@ services:
     command: >
       mongosh --host mongodb:27017 --eval
       "try { rs.status() } catch (e) {  rs.initiate({ _id: 'rs0', members: [ { _id: 0, host: 'localhost:27017' } ] } ) }"
+
+  # Aplicação em container, na mesma rede do Mongo e do Redpanda (opcional):
+  #   docker compose --profile app up -d --build
+  # Sem o profile, `docker compose up -d` sobe só a infraestrutura e a app roda no host (mvn spring-boot:run).
+  app:
+    profiles: [ "app" ]
+    build: .
+    image: conciliacao-pix:local
+    container_name: conciliacao-pix
+    ports:
+      - "8081:8081"
+    environment:
+      # O replica set foi iniciado como localhost:27017 (acesso pelo host); dentro da rede, directConnection
+      # conecta direto no nó sem a descoberta do replica set — as transações continuam funcionando.
+      SPRING_MONGODB_URI: mongodb://mongodb:27017/conciliacao-pix?directConnection=true
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      PIX_PARTITIONS: ${PIX_PARTITIONS:-6}
+      PIX_CONCURRENCY: ${PIX_CONCURRENCY:-6}
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # A imagem JRE não tem curl/wget; o bash faz o GET via /dev/tcp (sem instalar pacotes na imagem).
+      test: [ "CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8081 && printf 'GET /actuator/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"UP\"' <&3" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
 volumes:
   redpanda-data:
   mongo-data:

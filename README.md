@@ -177,8 +177,12 @@ O diagrama de módulos gerado a partir do código pelo Spring Modulith (PlantUML
 docker compose up -d
 docker compose ps            # mongo-init deve ter finalizado com exit code 0
 
-# 2. Aplicação
+# 2. Aplicação (no host)
 mvn spring-boot:run
+
+# 2'. Ou tudo em containers — a aplicação na mesma rede do Mongo e do Redpanda (Dockerfile na raiz)
+docker compose --profile app up -d --build
+docker compose ps            # conciliacao-pix deve ficar "healthy"
 
 # 3. Testes
 mvn test                     # unitários + arquitetura (não requer Docker)
@@ -192,6 +196,14 @@ mvn verify                   # + integração com Testcontainers (requer Docker)
 | OpenAPI (JSON) | http://localhost:8081/v3/api-docs |
 | Health / métricas | http://localhost:8081/actuator/health · `/actuator/metrics` · `/actuator/prometheus` |
 | Redpanda Console | http://localhost:8080 |
+
+**Imagem da aplicação** (`Dockerfile`): build multi-stage (Maven → JRE 25), jar extraído nas camadas do Spring Boot
+(dependências em camada separada do código: rebuild só troca a camada da aplicação), usuário sem privilégios,
+`MaxRAMPercentage` para respeitar o limite de memória do container. No compose ela fica sob o profile `app`, então
+`docker compose up -d` continua subindo só a infraestrutura. Dentro da rede do compose a aplicação usa
+`redpanda:9092` e `mongodb:27017?directConnection=true` (o replica set foi iniciado como `localhost:27017`, endereço
+válido só a partir do host). O healthcheck usa o `bash` da imagem (`/dev/tcp`), porque a imagem JRE não traz
+`curl`/`wget` — sem instalar pacotes só para isso.
 
 ### Passo a passo rápido
 
@@ -369,7 +381,8 @@ Produção das mensagens: ~20.000 msg/s (o gerador não é o gargalo).
 - **Abaixo da capacidade, o NFR de 2 s é atendido com folga** (p99 ≈ 0,7 s). No burst, a latência é quase toda
   **tempo de fila**: 5.000 mensagens chegam em 0,24 s e são drenadas a ~300/s — a mensagem de número 5.000 espera
   ~15 s por construção.
-- **A capacidade de um nó neste ambiente é ~300 conciliações/s.** Dobrar partições e threads (12 × 12) **não** aumentou
+- **A capacidade de um nó neste ambiente é ~300 conciliações/s com a aplicação no host** (~330–400/s com a aplicação
+  no container, ver "Aplicação no container × no host"). Dobrar partições e threads (12 × 12) **não** aumentou
   a vazão: o gargalo não é o paralelismo do consumer, e sim o custo por mensagem no MongoDB — 2 leituras + uma
   transação com 3 escritas e commit com journal, num único nó em Docker Desktop, mais as escritas do relay do outbox
   (`saveAll` = uma escrita por evento).
@@ -400,6 +413,31 @@ limpo, 299 conciliações/s), a partir do timer `mongodb.driver.commands` que o 
   10–20 % não são mensuráveis de forma confiável aqui — a validação de cada otimização abaixo pede um ambiente estável
   (máquina dedicada, várias rodadas, mediana).
 
+### Aplicação no container × no host (medido)
+
+Para separar o custo da rede do Docker Desktop do custo do banco, o mesmo burst de 5.000 mensagens foi rodado com a
+aplicação **dentro da rede do compose** (`docker compose --profile app up`) e **no host** (acesso ao Mongo pelo
+port-forwarding do Docker Desktop), alternando, com banco limpo a cada rodada:
+
+| Rodada | Aplicação | Vazão | p50 / p99 | `commitTransaction` | `find` em reconciliations | insert em reconciliations |
+|---|---|---|---|---|---|---|
+| 1 | container | **334/s** | 7,7 s / 13,9 s | 7,5 ms | **0,91 ms** | **1,02 ms** |
+| 2 | host | 241/s | 10,5 s / 22,4 s | 7,7 ms | 2,59 ms | 2,71 ms |
+| 3 | container | **397/s** | 6,2 s / 11,4 s | 6,5 ms | **0,79 ms** | **0,90 ms** |
+| 4 | host | 214/s | 11,6 s / 22,6 s | 12,0 ms | 2,28 ms | 2,41 ms |
+
+- **~1,6× mais vazão com a aplicação no container**, nas duas comparações lado a lado — diferença bem acima da
+  variação entre rodadas idênticas (215–287/s).
+- **Operações simples ~2,8× mais rápidas** (~0,85 ms × ~2,5 ms): o port-forwarding do Docker Desktop custava
+  ~1,5–1,8 ms por round-trip, ~8 ms por Pix.
+- **O `commitTransaction` não muda** (~6,5–7,5 ms): é custo de disco/journal, não de rede. Com a rede resolvida, o
+  commit passa a ser o custo dominante — o próximo ganho estrutural é reduzir commits (listener em lote, caminho 4
+  abaixo).
+- Corretude: esperado = obtido nas quatro rodadas.
+
+Os números da seção "Onde está o custo" acima foram medidos com a aplicação no host; parte dos ~2 ms por operação
+era a rede do ambiente de desenvolvimento, não o banco.
+
 ### Caminhos para melhorar o MongoDB (priorizados)
 
 Em ordem de relação ganho × risco. Nenhum foi aplicado nesta versão; todos preservam as garantias atuais
@@ -411,7 +449,7 @@ Em ordem de relação ganho × risco. Nenhum foi aplicado nesta versão; todos p
 | 2 | **`insert` em vez de `save()`** para registro e outbox (hoje `save()` com id preenchido vira upsert) | Custo de cada escrita; semântica mais correta (insert falha em id duplicado) | Pequeno por escrita, 2 escritas por conciliação | Baixo |
 | 3 | **Idempotência sem leitura prévia**: inserir direto e tratar `DuplicateKeyException` no serviço, **fora** da transação (que já terá sido desfeita), devolvendo o registro existente | 1 dos ~6 round-trips no caminho feliz (duplicatas são raras) | ~15 % menos comandos | Médio — altera a lógica de idempotência; exige teste de integração do caminho de duplicata concorrente |
 | 4 | **Listener em lote + `bulkWrite`**: N mensagens por poll, escritas agrupadas por coleção, uma transação por lote | Round-trips **e** commits: ~6 comandos por mensagem → poucos por lote; um flush de journal para N mensagens | O maior ganho disponível (ordem de grandeza) | Alto — falha de compare-and-set afeta o lote (reprocessar item a item), tratamento de falha parcial (`BatchListenerFailedException`), latência passa a depender do tamanho do lote |
-| 5 | **Aplicação na mesma rede do banco / Linux / disco dedicado** | ~2 ms por round-trip e o custo do journal em disco virtualizado | Grande neste ambiente (Docker Desktop no Windows é o pior caso) | Operacional, sem mudança de código |
+| 5 | **Aplicação na mesma rede do banco / Linux / disco dedicado** | ~2 ms por round-trip e o custo do journal em disco virtualizado | **Medido: ~1,6× mais vazão** só com a aplicação no container (ver acima); disco dedicado atacaria o commit | Operacional, sem mudança de código |
 | 6 | **Modelo sem transação multi-documento**: outbox embutido no documento da conciliação (escrita de um documento é atômica sem transação) + compare-and-set da fatura antes | Overhead de transação e o `commitTransaction` | Alto | Alto — falha entre as duas escritas exige rotina de recuperação |
 | 7 | **Cluster sharded** (chave hash em `txId`/`endToEndId`), relay por **CDC** (change streams / Debezium) | Limite de um nó; polling do outbox | Escala horizontal até o NFR | Infraestrutura de produção |
 
@@ -524,6 +562,7 @@ Cada decisão com o que se ganha, o que se paga e para onde ela evolui num cená
 | **Sem correlação de logs (MDC)** | Prazo | Rastrear um Pix nos logs exige busca por `endToEndId` | MDC com `endToEndId` no consumer e no relay; logs estruturados (JSON) para o agregador da nuvem |
 | **Sem Keycloak / controle de acesso** | Prazo | API de relatórios aberta | OIDC com o provedor de identidade da nuvem (ou Keycloak); papéis de leitura; mTLS/SASL entre serviços e broker |
 | **Mongo local sem autenticação** | Replica set + auth exige `--keyFile`; simplifica o dev | Inseguro fora do ambiente local | Autenticação, TLS, criptografia em repouso e segredos em cofre (ex.: AWS Secrets Manager / Vault) |
+| **Dockerfile multi-stage + JRE** (camadas do Spring Boot, não-root) | Build reproduzível sem Java no host; rebuild rápido (só a camada da aplicação muda); roda na mesma rede da infraestrutura | Imagem de ~600 MB (JRE Ubuntu); healthcheck improvisado com `bash` por falta de `curl` | Base distroless/Alpine menor; imagem publicada em registry com scan; o mesmo artefato em EKS com probes do Actuator |
 | **Sem GraalVM Native Image** | Evita configuração de reflection (Kafka/Mongo) | Startup e memória maiores de JVM | Avaliar nativo se o autoscaling precisar de partida rápida ou scale-to-zero |
 | **Testcontainers** nos testes de integração | Testa contra Mongo/Kafka reais, inclusive o rollback | Build mais lento; exige Docker na esteira | Rodar `mvn verify` na esteira de CI em todo PR |
 | **Demonstração de vazão por burst + ritmo constante** | Medição honesta num notebook + argumento de escala | Não prova 2k–7k TPS sustentados | Teste de carga sustentado em ambiente dimensionado, antes de cada mudança de capacidade |
@@ -540,6 +579,8 @@ Cada decisão com o que se ganha, o que se paga e para onde ela evolui num cená
   concorrentes numa instância; várias instâncias ainda não foram testadas (o relay do outbox, em particular, precisa
   de uma única instância ativa — ver abaixo).
 - **Configuração externa**: partições e threads por variável de ambiente (`PIX_PARTITIONS`, `PIX_CONCURRENCY`).
+- **Imagem de container**: `Dockerfile` multi-stage com camadas do Spring Boot, usuário não-root e limite de memória
+  respeitado pela JVM; a aplicação já roda em container na rede do compose (`--profile app`).
 - **Health probes**: Actuator já expõe os grupos `liveness` e `readiness`.
 - **Métricas no formato Prometheus**, incluindo a latência com SLO de 2 s.
 
@@ -593,7 +634,7 @@ Cada fase só começa quando a métrica da fase anterior indicar necessidade —
 | Fase | Objetivo | O que muda | Gatilho para a próxima fase |
 |---|---|---|---|
 | **0 — Hoje** | Provar corretude e medir | Monólito modular, 1 instância, Docker Compose | — |
-| **1 — Pronto para nuvem** | Rodar em produção sem mudar a arquitetura | Imagem OCI (`mvn spring-boot:build-image`); segredos em cofre; autenticação/TLS no Mongo e no Kafka; OIDC na API; fábricas Kafka via `ConnectionDetails`; graceful shutdown; logs JSON + MDC; Swagger desligado | Primeiro deploy estável com alertas da seção 10 |
+| **1 — Pronto para nuvem** | Rodar em produção sem mudar a arquitetura | Imagem publicada em registry (o `Dockerfile` já existe) com scan de vulnerabilidades; segredos em cofre; autenticação/TLS no Mongo e no Kafka; OIDC na API; fábricas Kafka via `ConnectionDetails`; graceful shutdown; logs JSON + MDC; Swagger desligado | Primeiro deploy estável com alertas da seção 10 |
 | **2 — Serviços gerenciados + escala de consumers** | Absorver o pico com mais réplicas | Kubernetes multi-AZ; Kafka e MongoDB gerenciados; partições dimensionadas para o pico; workers com autoscaling por lag; relay com uma instância ativa | CPU/latência do MongoDB saturando antes do pico (como no teste de carga) |
 | **3 — Tirar o gargalo do banco** | Menos round-trips por Pix | Listener em lote + `bulkWrite`; relay em lote ou CDC; `insert` no lugar de `save()`; idempotência sem leitura prévia (seção 8) | Um replica set não atende mesmo com lotes |
 | **4 — Escala horizontal do dado** | Throughput de escrita além de um nó | Sharding do MongoDB; separação worker × API; relatórios em réplicas secundárias ou visão pré-agregada | Necessidade de escalar/entregar módulos de forma independente |
