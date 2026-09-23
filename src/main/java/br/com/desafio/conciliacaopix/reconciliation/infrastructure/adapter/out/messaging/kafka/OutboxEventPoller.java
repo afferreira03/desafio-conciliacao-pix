@@ -8,6 +8,7 @@ import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.Schedu
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.domain.Limit;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -42,10 +43,23 @@ public class OutboxEventPoller {
         this.kafkaTemplate = kafkaTemplate;
     }
 
+    /**
+     * Drena o backlog em lotes: enquanto o lote vier cheio e todo ele for publicado com sucesso,
+     * busca o próximo imediatamente. Se houver qualquer falha, para e deixa o restante para o
+     * próximo ciclo — evita martelar o broker quando ele está indisponível.
+     */
     @Scheduled(fixedDelayString = "${app.timeknobs.outbox.poll-interval-ms:5000}")
     public void poll() {
-        List<OutboxEventDocument> pending = repository.findByStatus(OutboxEventStatus.PENDING);
-        if (pending.isEmpty()) return;
+        BatchResult result;
+        do {
+            result = publishBatch();
+        } while (result.fetched() == outboxTimeKnobs.batchSize() && result.allSent());
+    }
+
+    private BatchResult publishBatch() {
+        List<OutboxEventDocument> pending = repository.findByStatusOrderByCreatedAtAsc(
+                OutboxEventStatus.PENDING, Limit.of(outboxTimeKnobs.batchSize()));
+        if (pending.isEmpty()) return new BatchResult(0, true);
 
         Map<OutboxEventDocument, CompletableFuture<SendResult<String, String>>> futureMap = new LinkedHashMap<>();
 
@@ -64,6 +78,9 @@ public class OutboxEventPoller {
             allSends.get(outboxTimeKnobs.sendTimeoutMs(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             LOGGER.warn("Outbox batch não foi completamente concluída dentro dos {} ms.", outboxTimeKnobs.sendTimeoutMs());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOGGER.warn("Publicação do outbox interrompida.", e);
         } catch (Exception e) {
             LOGGER.warn("Outbox batch completado com pelo menos uma falha", e);
         }
@@ -76,12 +93,17 @@ public class OutboxEventPoller {
                 event.setSentAt(Instant.now());
                 sent.add(event);
             } else {
-                LOGGER.warn("Falha ao publicar evento de outbox {} - Será tentado novmente no próximo poll.", event.getId());
+                LOGGER.warn("Falha ao publicar evento de outbox {} - Será tentado novamente no próximo poll.", event.getId());
             }
         });
 
         if (!sent.isEmpty()) {
             repository.saveAll(sent);
         }
+
+        return new BatchResult(pending.size(), sent.size() == pending.size());
+    }
+
+    private record BatchResult(int fetched, boolean allSent) {
     }
 }

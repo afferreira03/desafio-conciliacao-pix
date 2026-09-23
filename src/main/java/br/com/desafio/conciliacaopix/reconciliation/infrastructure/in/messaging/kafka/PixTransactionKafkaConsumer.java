@@ -20,7 +20,7 @@ public class PixTransactionKafkaConsumer {
             containerFactory = "kafkaListenerContainerFactory"
     )
     public void consume(PixTransactionEventDto eventDto) {
-        log.info("Mensagem Pix recebida do kafka: endToEndId={}, txId={}, ", eventDto.endToEndId(), eventDto.txId());
+        log.debug("Mensagem Pix recebida do kafka: endToEndId={}, txId={}", eventDto.endToEndId(), eventDto.txId());
         useCase.reconcile(eventDto.toCommand());
     }
 }

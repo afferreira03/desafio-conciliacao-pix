@@ -31,7 +31,8 @@ app:
   timeknobs:
     outbox:
       send-timeout-ms: 30000
-      poll-interval-ms: 5000
+      poll-interval-ms: 1000
+      batch-size: 500
 
 springdoc:
   api-docs:
@@ -51,5 +52,5 @@ management:
 logging:
   level:
     root: "INFO"
-    br.com.desafio.conciliacaopix: DEBUG
+    br.com.desafio.conciliacaopix: INFO
 

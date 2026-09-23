@@ -8,13 +8,15 @@ import br.com.desafio.conciliacaopix.reconciliation.domain.model.vo.EndToEndId;
 import com.fasterxml.uuid.Generators;
 import lombok.*;
 import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
 import java.util.Objects;
 
 @Document(collection = "outbox_events")
+@CompoundIndex(name = "idx_outbox_pending_createdAt", def = "{'status': 1, 'createdAt': 1}",
+        partialFilter = "{ 'status' : 'PENDING' }")
 @Getter
 @Setter
 @NoArgsConstructor
@@ -27,7 +29,6 @@ public class OutboxEventDocument {
     private String endToEndId;
     private String eventType;
     private String payload;
-    @Indexed(partialFilter = "{ 'status' : 'PENDING' }")
     private OutboxEventStatus status;
     private Instant createdAt;
     private Instant sentAt;
