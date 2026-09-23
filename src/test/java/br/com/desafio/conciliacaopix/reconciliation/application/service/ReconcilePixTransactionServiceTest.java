@@ -3,6 +3,7 @@ package br.com.desafio.conciliacaopix.reconciliation.application.service;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.in.ReconciliationPixCommand;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadInvoicePort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadReconciliationPort;
+import br.com.desafio.conciliacaopix.reconciliation.application.port.out.ReconciliationMetricsPort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.SaveReconciliationPort;
 import br.com.desafio.conciliacaopix.reconciliation.domain.event.DomainEvent;
 import br.com.desafio.conciliacaopix.reconciliation.domain.event.PixInconsistentEvent;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -29,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -49,6 +52,9 @@ class ReconcilePixTransactionServiceTest {
     @Mock
     private LoadReconciliationPort loadReconciliationPort;
 
+    @Mock
+    private ReconciliationMetricsPort metricsPort;
+
     private ReconcilePixTransactionService service;
 
     @BeforeEach
@@ -57,7 +63,8 @@ class ReconcilePixTransactionServiceTest {
                 new ReconciliationEngine(),
                 loadInvoicePort,
                 saveReconciliationPort,
-                loadReconciliationPort
+                loadReconciliationPort,
+                metricsPort
         );
     }
 
@@ -86,6 +93,24 @@ class ReconcilePixTransactionServiceTest {
 
         assertThat(result).isSameAs(existing);
         verifyNoInteractions(loadInvoicePort, saveReconciliationPort);
+        verify(metricsPort).recordDuplicate();
+        verify(metricsPort, never()).recordReconciled(any(), any());
+    }
+
+    @Test
+    @DisplayName("Deve registrar métrica da conciliação com o paymentTimestamp após persistir")
+    void shouldRecordMetricsAfterPersisting() {
+        when(loadReconciliationPort.findByEndToEndId(any())).thenReturn(Optional.empty());
+        when(loadInvoicePort.findByTxId(any())).thenReturn(Optional.empty());
+        Instant paymentTimestamp = Instant.parse("2026-09-23T10:00:00Z");
+
+        ReconciliationRecord result = service.reconcile(
+                new ReconciliationPixCommand(E2E_ID, "TX999", Money.of(150.00), paymentTimestamp, PIX_KEY));
+
+        InOrder inOrder = inOrder(saveReconciliationPort, metricsPort);
+        inOrder.verify(saveReconciliationPort).save(eq(result), any(), any());
+        inOrder.verify(metricsPort).recordReconciled(result, paymentTimestamp);
+        verify(metricsPort, never()).recordDuplicate();
     }
 
     @Test

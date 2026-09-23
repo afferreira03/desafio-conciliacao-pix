@@ -3,6 +3,7 @@ package br.com.desafio.conciliacaopix.reconciliation.infrastructure.config;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.InvoiceQueryPort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadInvoicePort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.LoadReconciliationPort;
+import br.com.desafio.conciliacaopix.reconciliation.application.port.out.ReconciliationMetricsPort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.ReconciliationQueryPort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.SaveInvoicePort;
 import br.com.desafio.conciliacaopix.reconciliation.application.port.out.SaveReconciliationPort;
@@ -26,12 +27,14 @@ public class ReconciliationDomainConfig {
             ReconciliationEngine reconciliationEngine,
             LoadInvoicePort loadInvoicePort,
             SaveReconciliationPort saveReconciliationPort,
-            LoadReconciliationPort reconciliationPort) {
+            LoadReconciliationPort reconciliationPort,
+            ReconciliationMetricsPort metricsPort) {
         return new ReconcilePixTransactionService(
                 reconciliationEngine,
                 loadInvoicePort,
                 saveReconciliationPort,
-                reconciliationPort
+                reconciliationPort,
+                metricsPort
         );
     }
 
