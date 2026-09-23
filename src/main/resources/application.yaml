@@ -28,6 +28,10 @@ app:
       pix-transactions: pix.transactions
       pix-transactions-dlt: pix.transactions.DLT
       pix-reconciliation-result: pix.reconciliation.result
+    consumer:
+      # Partições só aumentam (Kafka não reduz). Threads > partições ficam ociosas.
+      partitions: ${PIX_PARTITIONS:6}
+      concurrency: ${PIX_CONCURRENCY:6}
   timeknobs:
     outbox:
       send-timeout-ms: 30000

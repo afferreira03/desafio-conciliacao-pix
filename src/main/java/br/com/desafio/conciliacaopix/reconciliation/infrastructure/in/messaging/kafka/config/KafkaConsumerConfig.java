@@ -1,6 +1,7 @@
 package br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging.kafka.config;
 
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.KafkaTopicsProperties;
+import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.PixConsumerProperties;
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging.kafka.dto.PixTransactionEventDto;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -29,19 +30,22 @@ import java.util.Map;
 public class KafkaConsumerConfig {
 
     private final KafkaTopicsProperties kafkaTopics;
+    private final PixConsumerProperties consumerProperties;
 
-    public KafkaConsumerConfig(KafkaTopicsProperties kafkaTopics) {
+    public KafkaConsumerConfig(KafkaTopicsProperties kafkaTopics, PixConsumerProperties consumerProperties) {
         this.kafkaTopics = kafkaTopics;
+        this.consumerProperties = consumerProperties;
     }
 
     @Bean
     public NewTopic pixTransactionTopic() {
-        return topic(kafkaTopics.pixTransactions(), 6);
+        return topic(kafkaTopics.pixTransactions(), consumerProperties.partitions());
     }
 
     @Bean
     public NewTopic pixTransactionsDLTTopic() {
-        return topic(kafkaTopics.pixTransactionsDlt(), 6);
+        // Mesmo número de partições: o recoverer publica no DLT preservando a partição de origem.
+        return topic(kafkaTopics.pixTransactionsDlt(), consumerProperties.partitions());
     }
 
     @Bean
@@ -83,7 +87,7 @@ public class KafkaConsumerConfig {
 
         var factory = new ConcurrentKafkaListenerContainerFactory<String, PixTransactionEventDto>();
         factory.setConsumerFactory(consumerFactory);
-        factory.setConcurrency(6);
+        factory.setConcurrency(consumerProperties.concurrency());
 
         Map<Class<?>, KafkaOperations<?, ?>> dltTemplates = new LinkedHashMap<>();
         dltTemplates.put(byte[].class, dltBytesTemplate);
