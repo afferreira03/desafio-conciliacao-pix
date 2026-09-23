@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -78,7 +79,9 @@ class InvoiceControllerTest {
                 .andExpect(status().isCreated())
                 .andExpect(header().string("Location", endsWith("/api/v1/invoices/TX123")))
                 .andExpect(jsonPath("$.status").value("ABERTA"))
-                .andExpect(jsonPath("$.pixKey").value("use***@email.com"));
+                .andExpect(jsonPath("$.pixKey").value("use***@email.com"))
+                // valor monetário sempre com 2 casas no JSON (verificado no texto: jsonPath converteria para double)
+                .andExpect(content().string(containsString("\"amount\":150.00")));
     }
 
     @Test

@@ -17,11 +17,21 @@ mvn spring-boot:run               # em outro terminal; aguardar "Started Concili
 Abas abertas: Swagger UI (`http://localhost:8081/swagger-ui.html`), Redpanda Console (`http://localhost:8080`, aba
 *Topics*), este roteiro, o README na seção 8.
 
-Função auxiliar para publicar um Pix (cole no terminal da demo):
+Funções auxiliares (cole no terminal da demo):
 
 ```powershell
 function Send-Pix($key, $json) { "$key $json" | docker exec -i redpanda rpk topic produce pix.transactions -f '%k %v\n' }
 $api = 'http://localhost:8081/api/v1'
+# Mostra o JSON exatamente como a API devolve (inclusive 4xx). Não usar Invoke-RestMethod na demo: ele converte
+# números para double e reformata os valores (150.00 vira 150.0).
+function Api($path, $body) {
+    $p = @{ Uri = "$api$path"; SkipHttpErrorCheck = $true }
+    if ($body) { $p.Method = 'Post'; $p.ContentType = 'application/json'; $p.Body = $body }
+    $r = Invoke-WebRequest @p
+    $c = $r.Content   # application/problem+json chega como byte[] no PowerShell
+    if ($c -is [byte[]]) { $c = [Text.Encoding]::UTF8.GetString($c) }
+    "HTTP $($r.StatusCode)"; $c
+}
 ```
 
 ---
@@ -38,13 +48,15 @@ Pelo Swagger (`POST /api/v1/invoices`) ou:
 
 ```powershell
 $exp = (Get-Date).ToUniversalTime().AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
-Invoke-RestMethod -Method Post "$api/invoices" -ContentType 'application/json' -Body "{`"txId`":`"DEMO1`",`"amount`":150.00,`"pixKey`":`"loja@demo.com`",`"expiresAt`":`"$exp`"}"
-Invoke-RestMethod -Method Post "$api/invoices" -ContentType 'application/json' -Body "{`"txId`":`"DEMO2`",`"amount`":80.00,`"pixKey`":`"loja@demo.com`",`"expiresAt`":`"$exp`"}"
-Invoke-RestMethod -Method Post "$api/invoices" -ContentType 'application/json' -Body "{`"txId`":`"DEMO3`",`"amount`":42.50,`"pixKey`":`"cliente.fallback@demo.com`",`"expiresAt`":`"$exp`"}"
-Invoke-RestMethod "$api/invoices/DEMO1"      # status ABERTA, chave Pix mascarada (LGPD)
-```
+Api '/invoices' "{`"txId`":`"DEMO1`",`"amount`":150.00,`"pixKey`":`"loja@demo.com`",`"expiresAt`":`"$exp`"}"
+Api '/invoices' "{`"txId`":`"DEMO2`",`"amount`":80.00,`"pixKey`":`"loja@demo.com`",`"expiresAt`":`"$exp`"}"
+Api '/invoices' "{`"txId`":`"DEMO3`",`"amount`":42.50,`"pixKey`":`"cliente.fallback@demo.com`",`"expiresAt`":`"$exp`"}"
+Api '/invoices/DEMO1'                        # status ABERTA, chave Pix mascarada (LGPD)
 
-Mostrar também um **409** (repetir o POST de `DEMO1`) e um **400** (valor negativo) → ProblemDetail.
+# Erros como ProblemDetail
+Api '/invoices' "{`"txId`":`"DEMO1`",`"amount`":150.00,`"pixKey`":`"loja@demo.com`",`"expiresAt`":`"$exp`"}"   # 409
+Api '/invoices' "{`"txId`":`"DEMO-9!`",`"amount`":-1,`"pixKey`":`"loja@demo.com`",`"expiresAt`":`"$exp`"}"    # 400 com errors[]
+```
 
 ## 3. Os três status ao vivo — 8 min
 
@@ -53,24 +65,25 @@ $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 
 # CONCILIADO
 Send-Pix 'DEMO1' "{`"endToEndId`":`"E0000000020260924100000000000001`",`"txId`":`"DEMO1`",`"transactionAmount`":150.00,`"paymentTimestamp`":`"$now`",`"pixKey`":`"loja@demo.com`"}"
-Invoke-RestMethod "$api/reconciliations/E0000000020260924100000000000001"
-Invoke-RestMethod "$api/invoices/DEMO1"      # agora PAGA
+Api '/reconciliations/E0000000020260924100000000000001'
+Api '/invoices/DEMO1'                        # agora PAGA
 
 # INCONSISTENTE — valor divergente
 Send-Pix 'DEMO2' "{`"endToEndId`":`"E0000000020260924100000000000002`",`"txId`":`"DEMO2`",`"transactionAmount`":79.90,`"paymentTimestamp`":`"$now`",`"pixKey`":`"loja@demo.com`"}"
-Invoke-RestMethod "$api/reconciliations/E0000000020260924100000000000002"   # AMOUNT_MISMATCH, expected 80.00
+Api '/reconciliations/E0000000020260924100000000000002'   # AMOUNT_MISMATCH, expectedAmount 80.00
 
 # INCONSISTENTE — segundo pagamento da fatura já paga
 Send-Pix 'DEMO1' "{`"endToEndId`":`"E0000000020260924100000000000003`",`"txId`":`"DEMO1`",`"transactionAmount`":150.00,`"paymentTimestamp`":`"$now`",`"pixKey`":`"loja@demo.com`"}"
-Invoke-RestMethod "$api/reconciliations/E0000000020260924100000000000003"   # INVOICE_ALREADY_PAID
+Api '/reconciliations/E0000000020260924100000000000003'   # INVOICE_ALREADY_PAID
 
 # PENDENTE — fatura inexistente
 Send-Pix 'NAOEXISTE' "{`"endToEndId`":`"E0000000020260924100000000000004`",`"txId`":`"NAOEXISTE`",`"transactionAmount`":10.00,`"paymentTimestamp`":`"$now`",`"pixKey`":`"loja@demo.com`"}"
-Invoke-RestMethod "$api/reconciliations/E0000000020260924100000000000004"
+Api '/reconciliations/E0000000020260924100000000000004'
 
 # CONCILIADO por fallback — sem txId: chave Pix + valor + janela de ±30 min
 Send-Pix 'E0000000020260924100000000000005' "{`"endToEndId`":`"E0000000020260924100000000000005`",`"txId`":null,`"transactionAmount`":42.50,`"paymentTimestamp`":`"$now`",`"pixKey`":`"cliente.fallback@demo.com`"}"
-Invoke-RestMethod "$api/invoices/DEMO3"      # PAGA
+Api '/reconciliations/E0000000020260924100000000000005'   # CONCILIADO, txId null
+Api '/invoices/DEMO3'                        # PAGA
 ```
 
 No Redpanda Console: tópico `pix.reconciliation.result` com um evento por conciliação (publicado pelo **outbox**).
@@ -80,8 +93,8 @@ No Redpanda Console: tópico `pix.reconciliation.result` com um evento por conci
 ```powershell
 # Reentrega exata do primeiro Pix → nenhum registro novo
 Send-Pix 'DEMO1' "{`"endToEndId`":`"E0000000020260924100000000000001`",`"txId`":`"DEMO1`",`"transactionAmount`":150.00,`"paymentTimestamp`":`"$now`",`"pixKey`":`"loja@demo.com`"}"
-Invoke-RestMethod "$api/reconciliations?size=10"                                   # continua 5 registros
-Invoke-RestMethod 'http://localhost:8081/actuator/metrics/pix.reconciliation.duplicates'
+Api '/reconciliations?size=10'               # totalElements continua 5
+(Invoke-WebRequest 'http://localhost:8081/actuator/metrics/pix.reconciliation.duplicates').Content
 
 # Mensagem envenenada → DLT (sem retry: erro de desserialização)
 Send-Pix 'LIXO' '{isto nao e json'
@@ -93,8 +106,8 @@ erro de desserialização → direto para o DLT.
 ## 5. Relatório — 2 min
 
 ```powershell
-Invoke-RestMethod "$api/reconciliations/summary" | ConvertTo-Json -Depth 5
-Invoke-RestMethod "$api/reconciliations?status=INCONSISTENTE&reason=AMOUNT_MISMATCH"
+Api '/reconciliations/summary'
+Api '/reconciliations?status=INCONSISTENTE&reason=AMOUNT_MISMATCH'
 ```
 
 ## 6. Carga — 6 min
@@ -109,7 +122,7 @@ tabela **esperado × obtido** toda OK, 0 no DLT, p99 < 1 s, 100 % dentro do SLO 
 Em seguida, README seção 8: o **burst** mostra a capacidade de ~300/s neste notebook; 12 × 12 não melhora → o gargalo
 é o MongoDB → argumento de escala (sharding, bulk writes, CDC).
 
-Mostrar também: `Invoke-RestMethod "$api/reconciliations/summary"` (os números do lote aparecem somados).
+Mostrar também: `Api '/reconciliations/summary'` (os números do lote aparecem somados).
 
 ## 7. Testes — 3 min
 
