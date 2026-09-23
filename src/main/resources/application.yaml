@@ -54,6 +54,10 @@ management:
         include: health,info,metrics,prometheus
 
 logging:
+  # Correlação por mensagem (MdcRecordInterceptor): endToEndId e posição no tópico em cada linha de log.
+  # O %replace remove o prefixo vazio nas linhas sem mensagem em processamento (startup, relay etc.).
+  pattern:
+    correlation: '%replace([e2e=%X{endToEndId:-} %X{kafka:-}] ){''\[e2e= \] '', ''''}'
   level:
     root: "INFO"
     br.com.desafio.conciliacaopix: INFO

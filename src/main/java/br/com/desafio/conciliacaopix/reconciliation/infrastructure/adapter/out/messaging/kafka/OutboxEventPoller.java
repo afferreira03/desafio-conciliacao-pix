@@ -7,6 +7,7 @@ import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.KafkaT
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.SchedulerTimeKnobs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.Limit;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -93,7 +94,9 @@ public class OutboxEventPoller {
                 event.setSentAt(Instant.now());
                 sent.add(event);
             } else {
-                LOGGER.warn("Falha ao publicar evento de outbox {} - Será tentado novamente no próximo poll.", event.getId());
+                try (MDC.MDCCloseable ignored = MDC.putCloseable("endToEndId", event.getEndToEndId())) {
+                    LOGGER.warn("Falha ao publicar evento de outbox {} - Será tentado novamente no próximo poll.", event.getId());
+                }
             }
         });
 

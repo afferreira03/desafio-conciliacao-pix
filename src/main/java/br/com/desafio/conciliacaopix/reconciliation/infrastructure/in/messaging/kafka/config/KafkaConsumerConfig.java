@@ -2,6 +2,7 @@ package br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging
 
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.KafkaTopicsProperties;
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.config.PixConsumerProperties;
+import br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging.kafka.MdcRecordInterceptor;
 import br.com.desafio.conciliacaopix.reconciliation.infrastructure.in.messaging.kafka.dto.PixTransactionEventDto;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -88,6 +89,7 @@ public class KafkaConsumerConfig {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, PixTransactionEventDto>();
         factory.setConsumerFactory(consumerFactory);
         factory.setConcurrency(consumerProperties.concurrency());
+        factory.setRecordInterceptor(new MdcRecordInterceptor());
 
         Map<Class<?>, KafkaOperations<?, ?>> dltTemplates = new LinkedHashMap<>();
         dltTemplates.put(byte[].class, dltBytesTemplate);
