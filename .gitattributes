@@ -1,0 +1,5 @@
+# Normaliza finais de linha no repositório; scripts de shell sempre com LF (um mvnw com CRLF quebra no Linux/macOS).
+* text=auto
+mvnw text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf

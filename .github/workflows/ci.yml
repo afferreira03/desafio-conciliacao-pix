@@ -28,7 +28,7 @@ jobs:
 
       # Unitários + arquitetura (surefire) e integração com Testcontainers (failsafe) — o runner tem Docker.
       - name: Build e testes
-        run: mvn -B -ntp verify
+        run: ./mvnw -B -ntp verify
 
       - name: Relatórios de teste
         if: failure()

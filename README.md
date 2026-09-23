@@ -191,7 +191,11 @@ para o outbox usa `switch` com pattern matching exaustivo: um evento novo não c
 
 ## 4. Como executar
 
-**Pré-requisitos**: Docker + Docker Compose, Java 25, Maven 3.9+.
+**Pré-requisitos**: Docker + Docker Compose e Java 25. O Maven vem pelo wrapper (`./mvnw`, que baixa o Maven
+3.9.16 na primeira execução). Para rodar só a aplicação em container (passo 2'), basta o Docker.
+
+Funciona em **Linux, macOS e Windows**. Os comandos abaixo são para bash (Linux/macOS/Git Bash); no Windows
+(PowerShell/cmd), troque `./mvnw` por `.\mvnw.cmd`.
 
 ```bash
 # 1. Infraestrutura (Redpanda, Redpanda Console, MongoDB em replica set)
@@ -199,16 +203,27 @@ docker compose up -d
 docker compose ps            # mongo-init deve ter finalizado com exit code 0
 
 # 2. Aplicação (no host)
-mvn spring-boot:run
+./mvnw spring-boot:run
 
 # 2'. Ou tudo em containers — a aplicação na mesma rede do Mongo e do Redpanda (Dockerfile na raiz)
 docker compose --profile app up -d --build
 docker compose ps            # conciliacao-pix deve ficar "healthy"
 
 # 3. Testes
-mvn test                     # unitários + arquitetura (não requer Docker)
-mvn verify                   # + integração com Testcontainers (requer Docker)
+./mvnw test                  # unitários + arquitetura (não requer Docker)
+./mvnw verify                # + integração com Testcontainers (requer Docker)
 ```
+
+**Notas por sistema operacional**
+- **macOS com Apple Silicon**: todas as imagens usadas (Redpanda, MongoDB 7, Temurin 25, Maven) têm versão arm64.
+- **macOS com Colima ou Rancher Desktop** (em vez do Docker Desktop): os testes de integração podem exigir que o
+  Testcontainers encontre o socket do Docker — por exemplo, no Colima,
+  `export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"` e
+  `export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`.
+- **Linux**: com o Docker Engine nativo, o usuário precisa ter acesso ao socket (grupo `docker`) para os testes de
+  integração.
+- O `mvnw` é versionado com final de linha LF e permissão de execução (`.gitattributes`); se um clone antigo reclamar
+  de permissão, `chmod +x mvnw`.
 
 | Serviço | URL |
 |---|---|
@@ -243,7 +258,7 @@ curl http://localhost:8081/api/v1/invoices/TX123           # status PAGA, chave 
 ```
 
 O roteiro completo da apresentação (os três status ao vivo, mensagem inválida no DLT, carga) está em
-[docs/ROTEIRO-DEMO.md](docs/ROTEIRO-DEMO.md).
+[docs/ROTEIRO-DEMO.md](docs/ROTEIRO-DEMO.md), com os comandos em PowerShell e em bash (Linux/macOS).
 
 ### Teste de carga
 
@@ -251,11 +266,11 @@ Com a infraestrutura e a aplicação no ar:
 
 ```bash
 # Burst: 5.000 mensagens o mais rápido possível
-mvn -q test-compile exec:java -Dexec.classpathScope=test \
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
     -Dexec.mainClass=br.com.desafio.conciliacaopix.loadtest.PixLoadDemo -Dexec.args=5000
 
 # Ritmo constante (ex.: 200 msg/s) — latência com chegada abaixo da capacidade
-mvn -q test-compile exec:java -Dexec.classpathScope=test \
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
     -Dexec.mainClass=br.com.desafio.conciliacaopix.loadtest.PixLoadDemo -Dexec.args=5000 -Dloadtest.rate=200
 ```
 
@@ -612,7 +627,7 @@ consultou o quê, quando), guardada fora do alcance da aplicação.
 | Integração | **Testcontainers** (MongoDB replica set + Redpanda) | Fluxo ponta a ponta até o tópico de resultado; idempotência; DLT; rollback real do compare-and-set; **concorrência real**: 6 pagamentos simultâneos da mesma fatura em 6 partições → exatamente 1 `CONCILIADO` e 5 `INVOICE_ALREADY_PAID` |
 | Carga | Gerador de burst / ritmo constante | Vazão, latência, contagens esperado × obtido |
 
-Execução: `mvn test` → 109 testes unitários e de arquitetura (não requer Docker). `mvn verify` → + 5 testes de
+Execução: `./mvnw test` → 114 testes unitários e de arquitetura (não requer Docker). `./mvnw verify` → + 5 testes de
 integração (`*IT`, via failsafe; requer Docker).
 
 O teste de concorrência não depende de sorte na intercalação: qualquer ordem leva ao mesmo resultado, e se um

@@ -1,7 +1,8 @@
 # Roteiro da demonstração (30 min) + pontos para a discussão (30 min)
 
-Comandos em **PowerShell** (Windows). Todos os `endToEndId` têm 32 caracteres (`E` + 31 alfanuméricos), como exige o
-value object `EndToEndId`.
+Comandos em **PowerShell** (Windows) ao longo do roteiro; a versão **bash (Linux/macOS)** dos mesmos passos está no
+[apêndice](#apêndice--comandos-em-bash-linuxmacos). Todos os `endToEndId` têm 32 caracteres (`E` + 31
+alfanuméricos), como exige o value object `EndToEndId`.
 
 ---
 
@@ -11,7 +12,7 @@ value object `EndToEndId`.
 docker compose down -v            # banco e tópicos limpos (apaga os dados de dev!)
 docker compose up -d
 docker compose ps                 # mongodb/redpanda healthy, mongo-init "Exited (0)"
-mvn spring-boot:run               # em outro terminal; aguardar "Started ConciliacaoPixApplication"
+.\mvnw.cmd spring-boot:run        # em outro terminal; aguardar "Started ConciliacaoPixApplication"
 ```
 
 Abas abertas: Swagger UI (`http://localhost:8081/swagger-ui.html`), Redpanda Console (`http://localhost:8080`, aba
@@ -113,7 +114,7 @@ Api '/reconciliations?status=INCONSISTENTE&reason=AMOUNT_MISMATCH'
 ## 6. Carga — 6 min
 
 ```powershell
-mvn -q test-compile exec:java "-Dexec.classpathScope=test" "-Dexec.mainClass=br.com.desafio.conciliacaopix.loadtest.PixLoadDemo" "-Dexec.args=5000" "-Dloadtest.rate=200"
+.\mvnw.cmd -q test-compile exec:java "-Dexec.classpathScope=test" "-Dexec.mainClass=br.com.desafio.conciliacaopix.loadtest.PixLoadDemo" "-Dexec.args=5000" "-Dloadtest.rate=200"
 ```
 
 ~25 s de envio. Enquanto roda: Console → consumer group `pix-reconciliation-group` (lag perto de zero). Ao final:
@@ -127,10 +128,10 @@ Mostrar também: `Api '/reconciliations/summary'` (os números do lote aparecem 
 ## 7. Testes — 3 min
 
 ```powershell
-mvn test        # ~1 min: 109 testes unitários e de arquitetura, sem Docker
+.\mvnw.cmd test   # ~1 min: 114 testes unitários e de arquitetura, sem Docker
 ```
 
-`mvn verify` (integração com Testcontainers) leva ~2–3 min: rodar antes e mostrar o resultado, ou deixar rodando
+`.\mvnw.cmd verify` (integração com Testcontainers) leva ~2–3 min: rodar antes e mostrar o resultado, ou deixar rodando
 durante a discussão. Destacar `ReconciliationFlowIT.compareAndSetRollsBackWholeTransaction` (rollback real no Mongo).
 
 ---
@@ -159,3 +160,97 @@ lembrar que escalar consumers sem aliviar o banco só move o gargalo (teste 12 �
 - LGPD: payload no log do `DefaultErrorHandler`; criptografia de campo como evolução.
 
 **Uso de IA** — `docs/USO-DE-IA.md`: onde ajudou, o que foi gerado a pedido, o que foi decidido e revisado por mim.
+
+---
+
+## Apêndice — comandos em bash (Linux/macOS)
+
+Mesmos passos, na mesma ordem. Requer `curl` e `docker`; o cálculo da data funciona com o `date` do GNU (Linux) e do
+BSD (macOS).
+
+**0. Antes de começar**
+
+```bash
+docker compose down -v            # banco e tópicos limpos (apaga os dados de dev!)
+docker compose up -d
+docker compose ps                 # mongodb/redpanda healthy, mongo-init "Exited (0)"
+./mvnw spring-boot:run            # em outro terminal; aguardar "Started ConciliacaoPixApplication"
+```
+
+Funções auxiliares (cole no terminal da demo):
+
+```bash
+api='http://localhost:8081/api/v1'
+send_pix() { printf '%s %s\n' "$1" "$2" | docker exec -i redpanda rpk topic produce pix.transactions -f '%k %v\n'; }
+api_get()  { curl -s -w '\nHTTP %{http_code}\n' "$api$1"; }
+api_post() { curl -s -w '\nHTTP %{http_code}\n' -H 'Content-Type: application/json' -d "$2" "$api$1"; }
+# Pix no formato da mensagem de entrada: pix <endToEndId> <txId|null> <valor> <chavePix>
+pix() {
+  local tx='null'; [ "$2" != 'null' ] && tx="\"$2\""
+  printf '{"endToEndId":"%s","txId":%s,"transactionAmount":%s,"paymentTimestamp":"%s","pixKey":"%s"}' \
+    "$1" "$tx" "$3" "$now" "$4"
+}
+exp=$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)
+```
+
+**2. Abrir faturas**
+
+```bash
+api_post /invoices "{\"txId\":\"DEMO1\",\"amount\":150.00,\"pixKey\":\"loja@demo.com\",\"expiresAt\":\"$exp\"}"
+api_post /invoices "{\"txId\":\"DEMO2\",\"amount\":80.00,\"pixKey\":\"loja@demo.com\",\"expiresAt\":\"$exp\"}"
+api_post /invoices "{\"txId\":\"DEMO3\",\"amount\":42.50,\"pixKey\":\"cliente.fallback@demo.com\",\"expiresAt\":\"$exp\"}"
+api_get /invoices/DEMO1                      # status ABERTA, chave Pix mascarada (LGPD)
+
+# Erros como ProblemDetail
+api_post /invoices "{\"txId\":\"DEMO1\",\"amount\":150.00,\"pixKey\":\"loja@demo.com\",\"expiresAt\":\"$exp\"}"   # 409
+api_post /invoices "{\"txId\":\"DEMO-9!\",\"amount\":-1,\"pixKey\":\"loja@demo.com\",\"expiresAt\":\"$exp\"}"    # 400 com errors[]
+```
+
+**3. Os três status ao vivo**
+
+```bash
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+send_pix DEMO1 "$(pix E0000000020260924100000000000001 DEMO1 150.00 loja@demo.com)"      # CONCILIADO
+api_get /reconciliations/E0000000020260924100000000000001
+api_get /invoices/DEMO1                      # agora PAGA
+
+send_pix DEMO2 "$(pix E0000000020260924100000000000002 DEMO2 79.90 loja@demo.com)"       # AMOUNT_MISMATCH
+api_get /reconciliations/E0000000020260924100000000000002
+
+send_pix DEMO1 "$(pix E0000000020260924100000000000003 DEMO1 150.00 loja@demo.com)"      # INVOICE_ALREADY_PAID
+api_get /reconciliations/E0000000020260924100000000000003
+
+send_pix NAOEXISTE "$(pix E0000000020260924100000000000004 NAOEXISTE 10.00 loja@demo.com)"   # PENDENTE
+api_get /reconciliations/E0000000020260924100000000000004
+
+send_pix E0000000020260924100000000000005 "$(pix E0000000020260924100000000000005 null 42.50 cliente.fallback@demo.com)"   # fallback
+api_get /reconciliations/E0000000020260924100000000000005
+api_get /invoices/DEMO3                      # PAGA
+```
+
+**4. Idempotência e DLT**
+
+```bash
+send_pix DEMO1 "$(pix E0000000020260924100000000000001 DEMO1 150.00 loja@demo.com)"      # reentrega → nada novo
+api_get '/reconciliations?size=10'           # totalElements continua 5
+curl -s http://localhost:8081/actuator/metrics/pix.reconciliation.duplicates; echo
+
+send_pix LIXO '{isto nao e json'             # mensagem envenenada → DLT
+```
+
+**5. Relatório**
+
+```bash
+api_get /reconciliations/summary
+api_get '/reconciliations?status=INCONSISTENTE&reason=AMOUNT_MISMATCH'
+```
+
+**6. Carga** e **7. Testes**
+
+```bash
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
+    -Dexec.mainClass=br.com.desafio.conciliacaopix.loadtest.PixLoadDemo -Dexec.args=5000 -Dloadtest.rate=200
+./mvnw test
+./mvnw verify
+```
